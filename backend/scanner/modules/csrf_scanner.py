@@ -68,11 +68,34 @@ class CSRFScanner:
         if method not in {"POST", "PUT", "DELETE", "PATCH"}:
             return findings
 
+        # Ignore framework-only forms (e.g. ASP.NET postback wrappers without user inputs)
+        framework_tokens = {
+            "__viewstate", "__eventvalidation", "__viewstategenerator",
+            "__eventtarget", "__eventargument", "viewstate"
+        }
+        meaningful_inputs = [
+            inp for inp in inputs
+            if str(inp.get("name", "")).lower() not in framework_tokens
+        ]
+        if not meaningful_inputs:
+            return findings
+
         # Skip pre-auth / non-mutating forms — match on individual path segments
         # so that e.g. /account/login is skipped but /account/settings is NOT.
         if self._is_preauth_action(action):
             print(f"Skipping CSRF check for pre-auth/search form: {action}")
             return findings
+
+        # Skip static read-only pages lacking state-changing context
+        action_lower = action.lower()
+        if any(seg in action_lower for seg in ["/about", "/default", "/index", "/readnews", "/view", "/display", "/home"]):
+            has_state_keyword = any(
+                kw in str(inp.get("name", "")).lower()
+                for inp in meaningful_inputs
+                for kw in ["comment", "message", "password", "email", "update", "delete", "create", "transfer", "role", "amount"]
+            )
+            if not has_state_keyword:
+                return findings
 
         print(f"Testing form {action} for CSRF protection...")
 

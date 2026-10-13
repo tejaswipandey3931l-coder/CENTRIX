@@ -2,7 +2,7 @@
 from __future__ import annotations
 import re
 from typing import Callable, Awaitable
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, urlparse, urljoin
 
 REQUIRED_HEADERS = {"content-security-policy": "Content-Security-Policy", "x-content-type-options": "X-Content-Type-Options", "x-frame-options": "X-Frame-Options"}
 CSRF_NAMES = {"csrf", "csrf_token", "xsrf", "xsrf_token", "authenticity_token", "_token"}
@@ -37,10 +37,13 @@ async def run(evidence: list[dict], log: Callable[[str], Awaitable[None]]) -> li
         findings.extend(_websocket_findings(url, headers, excerpt, seen))
         for form in item.get("forms", []):
             method = str(form.get("method", "GET")).upper()
+            action_url = urljoin(url, form.get("action") or url)
+            action_lower = action_url.lower()
             names = {str(name).lower() for name in form.get("inputs", [])}
-            looks_state_changing = method in {"POST", "PUT", "PATCH", "DELETE"} or bool(names.intersection(STATE_CHANGING_NAMES))
+            is_static_page = any(static_ext in action_lower for static_ext in ["/about", "/default", "/index", "/contact", "/home", "/view", "/display"]) and not any(kw in action_lower for kw in ["update", "delete", "create", "edit", "submit", "change", "post"])
+            looks_state_changing = (method in {"POST", "PUT", "PATCH", "DELETE"} or bool(names.intersection(STATE_CHANGING_NAMES))) and not is_static_page
             if looks_state_changing and not names.intersection(CSRF_NAMES):
-                findings.append({"type":"csrf", "url":form.get("action", url), "param":"form", "payload":"", "evidence":f"State-changing {method} form has no recognizable anti-CSRF token", "confidence":"Tentative"})
+                findings.append({"type":"csrf", "url": action_url, "param":"form", "payload":"", "evidence":f"State-changing {method} form has no recognizable anti-CSRF token", "confidence":"Tentative"})
     if missing_headers:
         observed = ", ".join(item["param"] for item in missing_headers.values())
         await log(f"[INFO] Missing security headers observed as telemetry only: {observed}")
@@ -58,16 +61,6 @@ def _parameter_surface_findings(url: str, query: str, seen: set[tuple[str, str]]
     for name, value in parse_qsl(query, keep_blank_values=True):
         lowered = name.lower()
         normalized = lowered.replace("-", "_")
-        if normalized in IDOR_PARAMETERS and value.isdigit() and (url, f"idor:{normalized}") not in seen:
-            seen.add((url, f"idor:{normalized}"))
-            findings.append({
-                "type": "idor",
-                "url": url,
-                "param": name,
-                "payload": value,
-                "evidence": "Predictable object identifier parameter observed in captured traffic",
-                "confidence": "Tentative",
-            })
         if normalized in SSRF_PARAMETERS and value.lower().startswith(("http://", "https://")) and (url, f"ssrf:{normalized}") not in seen:
             seen.add((url, f"ssrf:{normalized}"))
             findings.append({
@@ -76,6 +69,16 @@ def _parameter_surface_findings(url: str, query: str, seen: set[tuple[str, str]]
                 "param": name,
                 "payload": value[:120],
                 "evidence": "URL-valued server-side fetch style parameter observed in captured traffic",
+                "confidence": "Tentative",
+            })
+        if normalized in IDOR_PARAMETERS and value.isdigit() and (url, f"idor:{normalized}") not in seen:
+            seen.add((url, f"idor:{normalized}"))
+            findings.append({
+                "type": "idor",
+                "url": url,
+                "param": name,
+                "payload": value,
+                "evidence": f"Predictable identifier pattern observed: {name}={value}",
                 "confidence": "Tentative",
             })
     return findings

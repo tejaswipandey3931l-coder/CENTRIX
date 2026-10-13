@@ -116,7 +116,7 @@ async def run(
 
     await log("[INFO] Wraith compatibility pass started")
     all_urls = _dedupe([target, *urls])[: max(1, min(max_requests // 6, 80))]
-    normalized_forms = [_normalize_form(form) for form in forms[:30]]
+    normalized_forms = [_normalize_form(form, target=target) for form in forms[:30]]
     findings: list[dict] = []
 
     async with _AioHttpAdapter(timeout=timeout) as http:
@@ -330,7 +330,10 @@ async def _jwt_sweep(urls: list[str], timeout: int, log) -> list[dict]:
     return results
 
 
-def _normalize_form(form: dict) -> dict:
+def _normalize_form(form: dict, target: str = "") -> dict:
+    raw_action = form.get("action", "") or form.get("url", "")
+    base = form.get("url") or target
+    action = urljoin(base, raw_action) if base else raw_action
     fields = form.get("fields") or []
     if not fields and form.get("inputs"):
         fields = [{"name": name, "type": "text", "value": ""} if isinstance(name, str) else name for name in form.get("inputs", [])]
@@ -344,6 +347,7 @@ def _normalize_form(form: dict) -> dict:
             })
     return {
         **form,
+        "action": action,
         "method": str(form.get("method", "GET")).upper(),
         "fields": inputs,
         "inputs": inputs,

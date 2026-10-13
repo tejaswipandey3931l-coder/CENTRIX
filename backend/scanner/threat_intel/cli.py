@@ -184,7 +184,11 @@ def cmd_status(args: argparse.Namespace) -> None:
     scheduler_info = {
         "running": scheduler.running,
         "jobs": [
-            {"id": j.id, "name": j.name, "next_run": str(j.next_run_time) if j.next_run_time else None}
+            {
+                "id": j.id,
+                "name": j.name,
+                "next_run": str(getattr(j, "next_run_time", None)) if getattr(j, "next_run_time", None) else None,
+            }
             for j in scheduler.get_jobs()
         ],
         "sync_interval_hours": __import__("scanner.threat_intel.config", fromlist=["cfg"]).cfg.sync_interval_hours,
@@ -428,4 +432,9 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 
 if __name__ == "__main__":
+    if __package__ in (None, ""):
+        _backend_dir = Path(__file__).resolve().parent.parent.parent
+        if str(_backend_dir) not in sys.path:
+            sys.path.insert(0, str(_backend_dir))
+        __package__ = "scanner.threat_intel"
     main()

@@ -13,6 +13,8 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Response
 import db.store as store
 from api.models import Report, ReportConfig
 from reporting.pdf_report import build_centrix_pdf_report
+from reporting.github_issues import build_github_issues_bundle
+from reporting.jira import build_jira_export_bundle
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
@@ -50,6 +52,10 @@ async def generate_report(cfg: ReportConfig, bg: BackgroundTasks):
         report.content = _build_junit_report(report_id, state, findings)
     elif cfg.format == "evidence":
         report.content = _build_evidence_bundle(report_id, state, findings, evidence)
+    elif cfg.format == "github_issues":
+        report.content = build_github_issues_bundle(state, findings)
+    elif cfg.format == "jira":
+        report.content = build_jira_export_bundle(state, findings)
     elif cfg.format == "pdf":
         try:
             pdf_bytes = build_centrix_pdf_report(report_id, state, findings, evidence)
@@ -96,8 +102,10 @@ async def download_report(report_id: str):
         "junit": "application/xml; charset=utf-8",
         "evidence": "application/json",
         "pdf": "application/pdf",
+        "github_issues": "application/json",
+        "jira": "application/json",
     }
-    extensions = {"evidence": "json", "sarif": "sarif", "junit": "xml"}.get(fmt, fmt)
+    extensions = {"evidence": "json", "sarif": "sarif", "junit": "xml", "github_issues": "json", "jira": "json"}.get(fmt, fmt)
     headers = {"Content-Disposition": f'attachment; filename="{report_id}.{extensions}"'}
     if fmt == "pdf":
         return Response(

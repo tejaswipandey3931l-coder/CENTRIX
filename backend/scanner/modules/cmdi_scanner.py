@@ -168,17 +168,25 @@ class CMDIScanner:
             )
 
             if "sleep" in payload or "timeout" in payload or "ping" in payload:
+                b_data, b_headers, b_cookies = build_request_context(
+                    body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
+                    target_location, param_name, original_value
+                )
+                b_start = time.time()
+                await self._send_async(http, test_url, method, b_data, b_headers, b_cookies, body_format)
+                baseline_elapsed = time.time() - b_start
+
                 start = time.time()
                 resp = await self._send_async(http, test_url, method, data, headers, cookies, body_format)
                 elapsed = time.time() - start
-                if resp and elapsed >= 1.5:
+                if resp and elapsed >= max(2.0, baseline_elapsed + 1.8):
                     return {
                         "vulnerable": True,
                         "type": "command-injection",
                         "param": param_name,
                         "payload": payload,
-                        "evidence": "Response time: " + str(round(elapsed, 2)) + "s (expected delay)",
-                        "confidence": 80,
+                        "evidence": f"Response time: {round(elapsed, 2)}s (baseline: {round(baseline_elapsed, 2)}s, expected delay)",
+                        "confidence": 85,
                     }
             else:
                 resp = await self._send_async(http, test_url, method, data, headers, cookies, body_format)
@@ -217,17 +225,25 @@ class CMDIScanner:
                 target_location, param_name, injected
             )
             if dtype == "time":
+                b_data, b_headers, b_cookies = build_request_context(
+                    body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
+                    target_location, param_name, original_value
+                )
+                b_start = time.time()
+                await self._send_async(http, test_url, method, b_data, b_headers, b_cookies, body_format)
+                baseline_elapsed = time.time() - b_start
+
                 start = time.time()
                 resp = await self._send_async(http, test_url, method, data, headers, cookies, body_format)
                 elapsed = time.time() - start
-                if resp and elapsed >= 1.5:
+                if resp and elapsed >= max(2.0, baseline_elapsed + 1.8):
                     return {
                         "vulnerable": True,
                         "type": "command-injection",
                         "param": param_name,
                         "payload": payload,
-                        "evidence": "[waf-bypass:" + technique + "] Time: " + str(round(elapsed, 2)) + "s",
-                        "confidence": 78,
+                        "evidence": f"[waf-bypass:{technique}] Time: {round(elapsed, 2)}s (baseline: {round(baseline_elapsed, 2)}s)",
+                        "confidence": 82,
                     }
             else:
                 resp = await self._send_async(http, test_url, method, data, headers, cookies, body_format)
@@ -280,21 +296,27 @@ class CMDIScanner:
 
             # Time-based detection
             if "sleep" in payload or "timeout" in payload or "ping" in payload:
+                b_data, b_headers, b_cookies = build_request_context(
+                    body_fields, header_fields, cookie_fields, extra_headers, extra_cookies,
+                    target_location, param_name, original_value
+                )
+                b_start = time.time()
+                self._send_sync(test_url, method, b_data, b_headers, b_cookies, body_format)
+                baseline_elapsed = time.time() - b_start
+
                 start = time.time()
-                
                 resp = self._send_sync(test_url, method, data, headers, cookies, body_format)
-                
                 elapsed = time.time() - start
-                
-                if elapsed >= 1.5:
-                    print(f"Time-based command injection detected on {param_name} (elapsed={elapsed:.2f}s)")
+
+                if resp and elapsed >= max(2.0, baseline_elapsed + 1.8):
+                    print(f"Time-based command injection detected on {param_name} (elapsed={elapsed:.2f}s, baseline={baseline_elapsed:.2f}s)")
                     return {
                         "vulnerable": True,
                         "type": "command-injection",
                         "param": param_name,
                         "payload": payload,
-                        "evidence": f"Response time: {elapsed:.2f}s (expected delay)",
-                        "confidence": 80,
+                        "evidence": f"Response time: {elapsed:.2f}s (baseline: {baseline_elapsed:.2f}s, expected delay)",
+                        "confidence": 85,
                     }
             
             # Error-based detection

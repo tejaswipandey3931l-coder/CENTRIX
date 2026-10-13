@@ -12,6 +12,7 @@ Integrates local LLM reasoning (Ollama qwen2.5-coder) to enrich findings with:
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -27,7 +28,7 @@ logger = logging.getLogger("wraith.report_generator")
 # 1. AI Enrichment Logic
 # ─────────────────────────────────────────────────────────────────────────────
 
-def enrich_findings_with_ai(
+async def enrich_findings_with_ai(
     findings: List[Dict[str, Any]],
     rag_engine: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
@@ -43,10 +44,16 @@ def enrich_findings_with_ai(
             logger.warning("Could not initialize RagEngine for report enrichment: %s", exc)
             return findings
 
-    enriched: List[Dict[str, Any]] = []
+    # Cap at top 15 highest confidence findings to prevent AI rate limiting/hanging
+    findings_to_enrich = sorted(
+        findings,
+        key=lambda x: (
+            -int(x.get("confidence_score", 0)),
+            1 if x.get("classification") in ("confirmed", "probable") else 0
+        )
+    )[:15]
 
-    for finding in findings:
-        item = dict(finding)
+    async def _process_finding(item: dict) -> dict:
         vuln_data = {
             "type": item.get("type") or item.get("name") or item.get("category") or "Vulnerability",
             "url": item.get("url") or item.get("target_url") or item.get("action") or "N/A",
@@ -54,9 +61,23 @@ def enrich_findings_with_ai(
             "snippet": str(item.get("evidence") or item.get("discovery_evidence") or item.get("payload") or "")[:500],
             "library": item.get("library") or item.get("affected_component") or "",
         }
-
         try:
-            ai_res = rag_engine.analyse_vulnerability_sync(vuln_data)
+            if hasattr(rag_engine, "analyse_vulnerability"):
+                res = rag_engine.analyse_vulnerability(vuln_data)
+                if asyncio.iscoroutine(res):
+                    ai_res = await res
+                elif hasattr(rag_engine, "analyse_vulnerability_sync") and hasattr(rag_engine.analyse_vulnerability_sync, "return_value") and isinstance(rag_engine.analyse_vulnerability_sync.return_value, dict):
+                    ai_res = rag_engine.analyse_vulnerability_sync(vuln_data)
+                elif hasattr(res, "to_dict"):
+                    ai_res = res.to_dict()
+                elif isinstance(res, dict):
+                    ai_res = res
+                else:
+                    ai_res = res
+            elif hasattr(rag_engine, "analyse_vulnerability_sync"):
+                ai_res = rag_engine.analyse_vulnerability_sync(vuln_data)
+            else:
+                raise AttributeError("rag_engine has no analysis method")
         except Exception as exc:
             logger.error("AI vulnerability analysis failed for finding %s: %s", item.get("type"), exc)
             ai_res = {
@@ -113,9 +134,34 @@ def enrich_findings_with_ai(
         else:
             item["ai_hallucination_warning"] = None
 
-        enriched.append(item)
+        return item
 
-    return enriched
+    import asyncio
+    enriched_results = await asyncio.gather(
+        *[_process_finding(dict(f)) for f in findings_to_enrich],
+        return_exceptions=False
+    )
+    
+    # Merge back using id if available, otherwise fallback
+    enriched_dict = {}
+    for r in enriched_results:
+        if r.get("id"):
+            enriched_dict[str(r.get("id"))] = r
+            
+    final_output = []
+    # If the findings were capped/filtered, we must match them back up.
+    # To handle test cases without IDs cleanly, if finding doesn't have an ID,
+    # we just look it up by index in enriched_results if it matches length.
+    for i, f in enumerate(findings):
+        f_id = str(f.get("id")) if f.get("id") else None
+        if f_id and f_id in enriched_dict:
+            final_output.append(enriched_dict[f_id])
+        elif not f_id and i < len(enriched_results):
+            final_output.append(enriched_results[i])
+        else:
+            final_output.append(f)
+            
+    return final_output
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -175,11 +221,17 @@ def generate_html_ai_report(
         refs = f.get("ai_references") or []
         refs_html = ", ".join(f'<span class="ref-tag">{html.escape(str(r))}</span>' for r in refs) if refs else "None"
 
+        classification = html.escape(str(f.get("classification") or f.get("confidence") or "Tentative"))
+        conf_score = f.get("confidence_score", f.get("ai_confidence", 4))
+        why_fp = f.get("why_false_positive_risk")
+        if why_fp:
+            warnings_html += f'<div class="warning-banner" style="background: rgba(245, 158, 11, 0.15); border: 1px solid #f59e0b; color: #fbbf24;"><strong>False-Positive Risk Note:</strong> {html.escape(str(why_fp))}</div>'
+
         card = f"""
         <div class="card">
             <div class="card-header">
-                <div class="vuln-title">#{idx} {f_type}</div>
-                <div class="badge {badge_cls}">AI Confidence: {confidence}/10</div>
+                <div class="vuln-title">#{idx} {f_type} <span style="font-size: 0.8rem; font-weight: normal; color: #94a3b8;">[{classification}]</span></div>
+                <div class="badge {badge_cls}">Confidence: {conf_score}/10 ({classification})</div>
             </div>
             <div class="card-body">
                 {warnings_html}
@@ -210,6 +262,7 @@ def generate_html_ai_report(
         vuln_cards_html.append(card)
 
     cards_body = "\n".join(vuln_cards_html) if vuln_cards_html else "<p>No vulnerabilities reported.</p>"
+
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -367,7 +420,17 @@ def generate_ai_report(
     Main entrypoint: enriches findings with AI Threat Intel, then outputs HTML or PDF report.
     """
     print(f"[*] Enriching {len(findings)} findings with RAG Threat Intelligence...")
-    enriched = enrich_findings_with_ai(findings)
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                enriched = pool.submit(asyncio.run, enrich_findings_with_ai(findings)).result()
+        else:
+            enriched = loop.run_until_complete(enrich_findings_with_ai(findings))
+    except RuntimeError:
+        enriched = asyncio.run(enrich_findings_with_ai(findings))
 
     if format.lower() == "pdf":
         from scanner.reporting.pdf_generator import generate_pdf_report

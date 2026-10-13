@@ -99,6 +99,8 @@ async def retest_finding(finding_id: str, bg: BackgroundTasks):
     config.profile = ScanProfile.quick
     config.max_requests = min(config.max_requests, 120)
     config.depth = min(config.depth, 2)
+    config.retest_finding_id = finding_id
+    config.base_scan_id = original_scan.id
 
     scan_id = f"SCN-{uuid.uuid4().hex[:8].upper()}"
     state = ScanState(

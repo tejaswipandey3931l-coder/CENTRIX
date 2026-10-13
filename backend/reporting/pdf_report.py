@@ -19,7 +19,7 @@ except ImportError:
     HAS_REPORTLAB = False
     colors = None
 
-from api.models import EvidenceArtifact, Finding, ScanState
+from api.models import EvidenceArtifact, Finding, FindingClassification, ScanState, Severity
 
 BRAND = "Centrix"
 SCANNER_VERSION = "Centrix DAST Scanner"
@@ -72,11 +72,13 @@ def build_centrix_pdf_report(
     _append_cover(story, styles, report_id, state, findings, evidence)
     _append_summary(story, styles, findings)
     _append_remediation_plan(story, styles, findings)
+    _append_validation_required(story, styles, findings)
     _append_methodology(story, styles, state, evidence)
     _append_attack_scenarios(story, styles, findings)
     _append_toc(story, styles, findings)
     _append_details(story, styles, findings, evidence)
     _append_disclaimer(story, styles)
+
 
     footer = partial(_page_footer, target_url=state.config.target)
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
@@ -217,21 +219,42 @@ def _append_summary(story: list[Any], styles: dict[str, ParagraphStyle], finding
     story.append(Spacer(1, 14))
 
     if findings:
-        story.append(Paragraph("Findings Summary", styles["h2"]))
-        summary_rows = [["#", "Severity", "Finding", "Target", "CWE"]]
-        for index, finding in enumerate(_sorted_findings(findings), start=1):
+        story.append(Paragraph("Findings Summary & Evidence Classification", styles["h2"]))
+        summary_rows = [["ID", "Severity", "Class", "Conf", "Finding", "Target", "Param", "Evid", "Status"]]
+        for finding in _sorted_findings(findings):
             path = urlparse(finding.target).path or "/"
+            cls_val = getattr(finding, "classification", None)
+            cls_str = cls_val.value if hasattr(cls_val, "value") else str(cls_val or finding.confidence)
+            conf_score = getattr(finding, "confidence_score", 4)
+            evid_count = len(getattr(finding, "evidence_artifact_ids", []) or ([1] if finding.evidence else []))
+            is_info = (
+                cls_val == FindingClassification.informational
+                or cls_str == "Informational"
+                or finding.confidence == "Informational"
+                or finding.severity == Severity.info
+                or conf_score <= 2
+                or "observation" in finding.title.lower()
+            )
+            displayed_sev = "Info" if is_info else finding.severity.value
             summary_rows.append([
-                str(index),
-                finding.severity.value,
-                _clip(finding.title, 38),
-                _clip(path, 28),
-                finding.cwe or "N/A",
+                Paragraph(finding.id[:8], styles["small"]),
+                Paragraph(displayed_sev, styles["small"]),
+                Paragraph(cls_str, styles["small"]),
+                Paragraph(f"{conf_score}/10", styles["small"]),
+                Paragraph(_clip(finding.title, 30), styles["small"]),
+                Paragraph(_clip(path, 18), styles["small"]),
+                Paragraph(_clip(finding.parameter or "-", 10), styles["small"]),
+                Paragraph(str(evid_count), styles["small"]),
+                Paragraph(getattr(finding, "validation_status", "pending"), styles["small"]),
             ])
-        summary_table = Table(summary_rows, colWidths=[0.3 * inch, 0.75 * inch, 2.0 * inch, 1.55 * inch, 0.7 * inch])
-        summary_table.setStyle(_table_style(header=colors.HexColor("#334155"), font_size=7.2))
+        summary_table = Table(
+            summary_rows,
+            colWidths=[0.75 * inch, 0.6 * inch, 0.7 * inch, 0.45 * inch, 1.7 * inch, 1.1 * inch, 0.65 * inch, 0.4 * inch, 0.7 * inch],
+        )
+        summary_table.setStyle(_table_style(header=colors.HexColor("#334155"), font_size=6.8))
         story.append(summary_table)
     story.append(PageBreak())
+
 
 
 def _append_remediation_plan(story: list[Any], styles: dict[str, ParagraphStyle], findings: list[Finding]) -> None:
@@ -262,20 +285,78 @@ def _append_remediation_plan(story: list[Any], styles: dict[str, ParagraphStyle]
     story.append(Spacer(1, 14))
 
     priority_rows = [["Priority", "Finding", "Severity", "Owner Hint", "Retest"]]
-    for index, finding in enumerate(_sorted_findings(findings)[:12], start=1):
-        owner = _owner_hint(finding)
+    actionable_findings = [
+        f for f in _sorted_findings(findings)
+        if f.severity.value in {"Critical", "High", "Medium"}
+        and getattr(f, "classification", None) not in (FindingClassification.informational, "Informational")
+        and getattr(f, "confidence", "") != "Informational"
+        and getattr(f, "confidence_score", 4) >= 3
+        and "observation" not in f.title.lower()
+    ]
+    if actionable_findings:
+        for index, finding in enumerate(actionable_findings[:12], start=1):
+            owner = _owner_hint(finding)
+            priority_rows.append([
+                f"P{index}",
+                Paragraph(_esc(_clip(finding.title, 54)), styles["small"]),
+                finding.severity.value,
+                owner,
+                "Required",
+            ])
+    else:
         priority_rows.append([
-            f"P{index}",
-            Paragraph(_esc(_clip(finding.title, 54)), styles["small"]),
-            finding.severity.value,
-            owner,
-            "Required" if finding.severity.value in {"Critical", "High", "Medium"} else "Optional",
+            "-",
+            Paragraph("No critical or high-priority vulnerabilities identified; remaining items are informational hardening observations.", styles["small"]),
+            "Info",
+            "SecOps/Dev",
+            "Optional",
         ])
     priority_table = Table(priority_rows, colWidths=[0.45 * inch, 2.25 * inch, 0.75 * inch, 1.25 * inch, 0.75 * inch])
     priority_table.setStyle(_table_style(header=colors.HexColor("#334155"), font_size=7.0))
     story.append(Paragraph("Prioritized Fix Queue", styles["h2"]))
     story.append(priority_table)
     story.append(PageBreak())
+
+
+def _append_validation_required(story: list[Any], styles: dict[str, ParagraphStyle], findings: list[Finding]) -> None:
+    pending_findings = [
+        f for f in findings
+        if getattr(f, "classification", None) in ("Tentative", "Probable")
+        or getattr(getattr(f, "classification", None), "value", "") in ("Tentative", "Probable")
+        or getattr(f, "validation_status", "") == "pending"
+    ]
+    if not pending_findings:
+        return
+
+    story.append(Paragraph("Manual Validation Required", styles["h1"]))
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(
+        "The following items represent candidates, unconfirmed observations, or weak signals where "
+        "direct proof of exploitability was unavailable during automated testing. These findings must "
+        "be reviewed and verified manually before setting remediation SLAs.",
+        styles["normal"],
+    ))
+    story.append(Spacer(1, 10))
+
+    val_rows = [["ID", "Finding", "Classification", "Confidence", "Why Validation is Required"]]
+    for f in pending_findings:
+        cls_val = getattr(f, "classification", None)
+        cls_str = cls_val.value if hasattr(cls_val, "value") else str(cls_val or f.confidence)
+        conf_score = getattr(f, "confidence_score", 4)
+        risk_why = getattr(f, "why_false_positive_risk", None) or "Lacks direct reproduction artifact."
+        val_rows.append([
+            Paragraph(f.id[:8], styles["small"]),
+            Paragraph(_clip(f.title, 32), styles["small"]),
+            Paragraph(cls_str, styles["small"]),
+            Paragraph(f"{conf_score}/10", styles["small"]),
+            Paragraph(_clip(risk_why, 60), styles["small"]),
+        ])
+
+    table = Table(val_rows, colWidths=[0.8 * inch, 1.8 * inch, 0.9 * inch, 0.6 * inch, 2.74 * inch])
+    table.setStyle(_table_style(header=colors.HexColor("#ca8a04"), font_size=7.2))
+    story.append(table)
+    story.append(PageBreak())
+
 
 
 def _append_methodology(story: list[Any], styles: dict[str, ParagraphStyle], state: ScanState, evidence: list[EvidenceArtifact]) -> None:
@@ -376,14 +457,25 @@ def _append_details(story: list[Any], styles: dict[str, ParagraphStyle], finding
         story.append(badge)
         story.append(Spacer(1, 8))
 
+        cls_val = getattr(finding, "classification", None)
+        cls_str = cls_val.value if hasattr(cls_val, "value") else str(cls_val or finding.confidence)
+        conf_score = getattr(finding, "confidence_score", 4)
+        repro_status = getattr(finding, "reproduction_status", "untested")
+        val_status = getattr(finding, "validation_status", "pending")
+        evid_ids = getattr(finding, "evidence_artifact_ids", []) or ([finding.id] if finding.evidence else [])
+
         glance_rows = [
             ["Severity", finding.severity.value],
+            ["Classification", cls_str],
+            ["Confidence", f"{conf_score}/10 ({finding.confidence})"],
             ["CVSS", str(finding.cvss or "N/A")],
             ["CWE", finding.cwe or "N/A"],
             ["Category", finding.category],
             ["Target", finding.target],
             ["Parameter", finding.parameter or "N/A"],
-            ["Confidence", finding.confidence],
+            ["Reproduction", repro_status],
+            ["Validation Status", val_status],
+            ["Evidence Artifacts", str(len(evid_ids))],
             ["Status", finding.status.value],
             ["Suggested Owner", _owner_hint(finding)],
             ["Retest Priority", "Required" if finding.severity.value in {"Critical", "High", "Medium"} else "Optional"],
@@ -391,9 +483,25 @@ def _append_details(story: list[Any], styles: dict[str, ParagraphStyle], finding
         story.append(_key_value_table(glance_rows))
         story.append(Spacer(1, 10))
 
+        why_risk = getattr(finding, "why_false_positive_risk", None)
+        if why_risk:
+            story.append(Paragraph("Why this may be a false positive", styles["h2"]))
+            warn_table = Table([[Paragraph(f"<b>False-Positive Risk Analysis:</b> {_esc(why_risk)}", styles["small"])]], colWidths=[6.84 * inch])
+            warn_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fef3c7")),
+                ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#f59e0b")),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ]))
+            story.append(warn_table)
+            story.append(Spacer(1, 8))
+
         story.append(Paragraph("Description", styles["h2"]))
         story.append(Paragraph(_esc(finding.description), styles["normal"]))
         story.append(Spacer(1, 8))
+
 
         story.append(Paragraph("Evidence", styles["h2"]))
         evidence_block = _evidence_block(finding, evidence_by_url.get(finding.target))
@@ -509,12 +617,36 @@ def _table_style(header: Any = None, font_size: float = 8.0) -> Any:
 def _severity_counts(findings: list[Finding]) -> dict[str, int]:
     counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}
     for finding in findings:
-        counts[finding.severity.value] = counts.get(finding.severity.value, 0) + 1
+        cls_val = getattr(finding, "classification", None)
+        is_info = (
+            cls_val == FindingClassification.informational
+            or getattr(cls_val, "value", "") == "Informational"
+            or finding.confidence == "Informational"
+            or finding.severity == Severity.info
+            or getattr(finding, "confidence_score", 4) <= 2
+            or "observation" in finding.title.lower()
+        )
+        if is_info:
+            counts["Info"] += 1
+        else:
+            counts[finding.severity.value] = counts.get(finding.severity.value, 0) + 1
     return counts
 
 
 def _sorted_findings(findings: list[Finding]) -> list[Finding]:
-    return sorted(findings, key=lambda finding: (_severity_rank(finding.severity.value), finding.title.lower()))
+    def rank_key(finding: Finding):
+        cls_val = getattr(finding, "classification", None)
+        is_info = (
+            cls_val == FindingClassification.informational
+            or getattr(cls_val, "value", "") == "Informational"
+            or finding.confidence == "Informational"
+            or finding.severity == Severity.info
+            or getattr(finding, "confidence_score", 4) <= 2
+            or "observation" in finding.title.lower()
+        )
+        sev_rank = 4 if is_info else _severity_rank(finding.severity.value)
+        return (sev_rank, finding.title.lower())
+    return sorted(findings, key=rank_key)
 
 
 def _severity_rank(value: str) -> int:

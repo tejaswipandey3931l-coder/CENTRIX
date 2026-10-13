@@ -1,19 +1,15 @@
 import { useEffect, useState } from "react"
-import { GitCompare, Play, Save } from "lucide-react"
-import { manualApi, scanApi } from "../api/client"
+import { Save, GitCompare, Send, Terminal, CheckCircle2 } from "lucide-react"
+import { manualApi, scanApi, type ScanItem, type ReplayResponse, type CompareResult, type RepeaterRequest } from "../api/client"
+import { CyberCard } from "../components/ui/CyberCard"
+import { CyberButton } from "../components/ui/CyberButton"
+
+import { useScanContext } from "../context/ScanContext"
 
 interface ManualTestingProps {
-  onNavigate: (page: string) => void
-  repeaterRequest: any
-  setRepeaterRequest: (value: unknown) => void
-}
-
-type ReplayResponse = {
-  status: number
-  headers: Record<string, string>
-  body: string
-  length: number
-  duration_ms: number
+  onNavigate?: (page: string) => void
+  repeaterRequest?: RepeaterRequest | null
+  setRepeaterRequest?: (value: RepeaterRequest | null) => void
 }
 
 function originOf(value: string) {
@@ -25,13 +21,13 @@ function originOf(value: string) {
   }
 }
 
-function scanMatchesUrl(scan: any, requestUrl: string) {
+function scanMatchesUrl(scan: ScanItem | null | undefined, requestUrl: string) {
   const requestOrigin = originOf(requestUrl)
   const scanOrigin = originOf(scan?.target || "")
   return Boolean(requestOrigin && scanOrigin && requestOrigin === scanOrigin)
 }
 
-function bestScan(scans: any[], requestUrl = "") {
+function bestScan(scans: ScanItem[], requestUrl = ""): ScanItem | null {
   if (!scans.length) return null
   if (requestUrl) {
     const matching = scans.find((scan) => scanMatchesUrl(scan, requestUrl))
@@ -40,7 +36,8 @@ function bestScan(scans: any[], requestUrl = "") {
   return (
     scans.find((scan) => scan.status === "completed" && scan.findings_count > 0) ||
     scans.find((scan) => scan.status === "completed") ||
-    scans[0]
+    scans[0] ||
+    null
   )
 }
 
@@ -48,7 +45,11 @@ export default function ManualTesting({
   repeaterRequest,
   setRepeaterRequest,
 }: ManualTestingProps) {
-  const [scans, setScans] = useState<any[]>([])
+  const context = useScanContext()
+  const activeReq = repeaterRequest ?? context.repeaterRequest
+  const setActiveReq = setRepeaterRequest ?? context.setRepeaterRequest
+
+  const [scans, setScans] = useState<ScanItem[]>([])
   const [scanId, setScanId] = useState("")
   const [method, setMethod] = useState("GET")
   const [url, setUrl] = useState("")
@@ -57,17 +58,25 @@ export default function ManualTesting({
   const [activeSlot, setActiveSlot] = useState<"left" | "right">("left")
   const [leftResult, setLeftResult] = useState<ReplayResponse | null>(null)
   const [rightResult, setRightResult] = useState<ReplayResponse | null>(null)
-  const [comparison, setComparison] = useState<any>(null)
-  const [collection, setCollection] = useState<any[]>([])
+  const [comparison, setComparison] = useState<CompareResult | null>(null)
   const [busy, setBusy] = useState(false)
+  const [saveMessage, setSaveMessage] = useState("")
   const [error, setError] = useState("")
 
   useEffect(() => {
-    void scanApi.list().then((items) => {
-      setScans(items)
-      const selected = bestScan(items)
-      if (selected) setScanId(selected.id)
-    }).catch(() => setScans([]))
+    void scanApi
+      .list()
+      .then((items) => {
+        setScans(items)
+        const selected = bestScan(items)
+        if (selected) {
+          setScanId(selected.id)
+          if (!url && selected.target) {
+            setUrl(`${selected.target}/api/v1/resource`)
+          }
+        }
+      })
+      .catch(() => setScans([]))
   }, [])
 
   useEffect(() => {
@@ -79,14 +88,18 @@ export default function ManualTesting({
   }, [url, scans, scanId])
 
   useEffect(() => {
-    if (!repeaterRequest) return
-    if (repeaterRequest.url) setUrl(repeaterRequest.url)
-    if (repeaterRequest.method) setMethod(repeaterRequest.method)
-    if (repeaterRequest.scan_id) setScanId(repeaterRequest.scan_id)
-    if (repeaterRequest.request_headers) setHeaders(JSON.stringify(repeaterRequest.request_headers, null, 2))
-    if (repeaterRequest.request_body) setBody(repeaterRequest.request_body)
-    setRepeaterRequest(null)
-  }, [repeaterRequest, setRepeaterRequest])
+    if (!activeReq) return
+    if (activeReq.url) setUrl(activeReq.url)
+    if (activeReq.method) setMethod(activeReq.method)
+    if (activeReq.scan_id) setScanId(activeReq.scan_id)
+    if (activeReq.request_headers || activeReq.headers) {
+      setHeaders(JSON.stringify(activeReq.request_headers || activeReq.headers, null, 2))
+    }
+    if (activeReq.request_body || activeReq.body) {
+      setBody(activeReq.request_body || activeReq.body || "")
+    }
+    setActiveReq(null)
+  }, [activeReq, setActiveReq])
 
   const replay = async () => {
     setError("")
@@ -104,246 +117,284 @@ export default function ManualTesting({
         headers: parsedHeaders,
         body: body || undefined,
       })
-      if (activeSlot === "left") {
-        setLeftResult(result)
-      } else {
-        setRightResult(result)
-      }
+      if (activeSlot === "left") setLeftResult(result)
+      else setRightResult(result)
     } catch (reason: any) {
-      const matching = bestScan(scans, url)
-      if (matching && scanMatchesUrl(matching, url) && matching.id !== scanId) {
-        setScanId(matching.id)
-        setError(`Scope mismatch fixed: switched to ${matching.id}. Click Send again.`)
-      } else {
-        setError(reason.message || "Replay failed")
-      }
+      setError(reason.message || "Manual request replay failed.")
     } finally {
       setBusy(false)
     }
   }
 
-  const compare = async () => {
-    if (!leftResult || !rightResult) return
-    setError("")
-    try {
-      setComparison(await manualApi.compare(leftResult, rightResult))
-    } catch (reason: any) {
-      setError(reason.message || "Compare failed")
-    }
-  }
-
   const saveRequest = async () => {
-    const item = { scanId, method, url, headers, body, saved_at: new Date().toISOString() }
-    setCollection((current) => [item, ...current].slice(0, 25))
     try {
+      const activeResp = activeSlot === "left" ? leftResult : rightResult
       await manualApi.saveRequest({
         scan_id: scanId,
         method,
         url,
         headers: JSON.parse(headers || "{}"),
         body: body || undefined,
-        note: "Saved from Repeater",
+        response: activeResp || undefined,
       })
+      setSaveMessage("Captured request & response committed to corpus vault.")
+      setTimeout(() => setSaveMessage(""), 3000)
     } catch (reason: any) {
-      setError(reason.message || "Could not save request to corpus.")
+      setError(reason.message || "Failed to save request to corpus.")
     }
   }
 
+  const compare = async () => {
+    if (!leftResult || !rightResult) return
+    try {
+      const result = await manualApi.compare(leftResult, rightResult)
+      setComparison(result)
+    } catch (reason: any) {
+      setError(reason.message || "Response comparison failed.")
+    }
+  }
+
+  const currentResult = activeSlot === "left" ? leftResult : rightResult
+
   return (
-    <div className="p-6 max-w-[1280px] mx-auto">
-      <div className="flex items-center justify-between gap-4">
+    <div className="p-4 sm:p-6 lg:p-8 max-w-[1700px] mx-auto space-y-6">
+      {/* Header */}
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-5">
         <div>
-          <h1 className="text-lg font-semibold text-ink">Manual Workbench</h1>
-          <p className="text-sm text-ink-3 mt-1">Repeater requests are restricted to the selected authorised scan scope.</p>
-          {url && scans.length > 0 && (
-            <p className="text-xs text-ink-3 mt-2">
-              Scope helper: {bestScan(scans, url) && scanMatchesUrl(bestScan(scans, url), url)
-                ? `matched ${bestScan(scans, url)?.id} for ${originOf(url)}`
-                : "no saved scan matches this URL yet"}
-            </p>
-          )}
+          <h1 className="text-xl font-bold tracking-wider text-ink uppercase font-display flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-cyan shadow-[0_0_8px_#00f0ff]" />
+            Offensive Repeater Workbench
+          </h1>
+          <p className="text-xs text-ink-3 font-mono mt-1">
+            Manual HTTP payload modification, response replay verification, and differential analysis.
+          </p>
         </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => void saveRequest()}
+
+        <div className="flex items-center gap-2.5">
+          <CyberButton
+            variant="secondary"
+            size="sm"
+            icon={<Save size={13} />}
             disabled={!url}
-            className="inline-flex items-center gap-2 px-3 py-2 bg-elevated border border-border text-ink rounded text-sm disabled:opacity-40"
+            onClick={() => void saveRequest()}
           >
-            <Save size={15} />
-            Save
-          </button>
-          <button
-            disabled={!scanId || !url || busy}
+            SAVE TO CORPUS
+          </CyberButton>
+
+          <CyberButton
+            variant="primary"
+            size="sm"
+            hudCorners
+            loading={busy}
+            disabled={!url}
+            icon={<Send size={13} />}
             onClick={() => void replay()}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-accent text-white rounded text-sm disabled:opacity-40"
           >
-            <Play size={15} />
-            {busy ? "Sending..." : `Send to ${activeSlot}`}
-          </button>
+            TRANSMIT REQUEST
+          </CyberButton>
         </div>
       </div>
 
-      <div className="mt-5 grid xl:grid-cols-[390px_minmax(0,1fr)] gap-5">
-        <section className="bg-card border border-border rounded-lg p-4 space-y-3">
-          <label className="block text-sm text-ink">
-            Scan scope
+      {saveMessage && (
+        <div className="p-3 rounded border border-emerald/40 bg-emerald/10 text-emerald text-xs font-mono flex items-center gap-2">
+          <CheckCircle2 size={14} className="shrink-0" />
+          <span>{saveMessage}</span>
+        </div>
+      )}
+
+      {error && (
+        <div className="p-3.5 rounded border border-critical/40 bg-critical/10 text-critical text-xs font-mono">
+          {error}
+        </div>
+      )}
+
+      {/* Target & Method Bar */}
+      <CyberCard noPadding className="p-3.5">
+        <div className="grid md:grid-cols-12 gap-3 items-center font-mono text-xs">
+          <div className="md:col-span-3">
             <select
               value={scanId}
-              onChange={(event) => setScanId(event.target.value)}
-              className="mt-2 w-full bg-canvas border border-border rounded p-2 text-ink"
+              onChange={(e) => setScanId(e.target.value)}
+              className="w-full bg-surface border border-border focus:border-cyan/50 rounded px-2.5 py-1.5 text-ink cursor-pointer"
             >
-              {scans.map((scan) => (
-                <option key={scan.id} value={scan.id}>{scan.id} - {scan.target}</option>
+              {scans.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.id} - {s.target}
+                </option>
               ))}
             </select>
-          </label>
+          </div>
 
-          <div className="grid grid-cols-[120px_1fr] gap-2">
+          <div className="md:col-span-2">
             <select
               value={method}
-              onChange={(event) => setMethod(event.target.value)}
-              className="bg-canvas border border-border rounded p-2 text-ink"
+              onChange={(e) => setMethod(e.target.value)}
+              className="w-full bg-surface border border-border focus:border-cyan/50 rounded px-2.5 py-1.5 text-cyan font-bold cursor-pointer"
             >
-              <option>GET</option>
-              <option>POST</option>
-              <option>PUT</option>
-              <option>PATCH</option>
-              <option>DELETE</option>
-              <option>HEAD</option>
-              <option>OPTIONS</option>
+              {["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"].map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
             </select>
+          </div>
+
+          <div className="md:col-span-7">
             <input
+              type="text"
               value={url}
-              onChange={(event) => setUrl(event.target.value)}
-              placeholder="https://authorised-target.example/path"
-              className="bg-canvas border border-border rounded p-2 text-ink"
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://target.com/api/v1/auth"
+              className="w-full bg-surface border border-border focus:border-cyan/50 rounded px-3 py-1.5 text-ink text-xs font-mono"
             />
           </div>
-
-          <label className="block text-sm text-ink">
-            Headers JSON
-            <textarea
-              value={headers}
-              onChange={(event) => setHeaders(event.target.value)}
-              spellCheck={false}
-              className="mt-2 w-full h-28 bg-canvas border border-border rounded p-2 text-xs font-mono text-ink"
-            />
-          </label>
-
-          <label className="block text-sm text-ink">
-            Body
-            <textarea
-              value={body}
-              onChange={(event) => setBody(event.target.value)}
-              className="mt-2 w-full h-36 bg-canvas border border-border rounded p-2 text-sm text-ink"
-            />
-          </label>
-
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              onClick={() => setActiveSlot("left")}
-              className={`px-3 py-2 rounded border text-sm ${activeSlot === "left" ? "border-accent bg-accent/10 text-accent" : "border-border text-ink-2"}`}
-            >
-              Left
-            </button>
-            <button
-              onClick={() => setActiveSlot("right")}
-              className={`px-3 py-2 rounded border text-sm ${activeSlot === "right" ? "border-accent bg-accent/10 text-accent" : "border-border text-ink-2"}`}
-            >
-              Right
-            </button>
-          </div>
-
-          {error && <p className="text-xs text-critical">{error}</p>}
-
-          <div className="border border-border rounded overflow-hidden">
-            <div className="px-3 py-2 border-b border-border text-xs text-ink-3">Collection</div>
-            {collection.length ? (
-              <div className="max-h-44 overflow-auto divide-y divide-border">
-                {collection.map((item, index) => (
-                  <button
-                    key={`${item.url}-${index}`}
-                    onClick={() => {
-                      setScanId(item.scanId)
-                      setMethod(item.method)
-                      setUrl(item.url)
-                      setHeaders(item.headers)
-                      setBody(item.body)
-                    }}
-                    className="w-full text-left px-3 py-2 hover:bg-elevated"
-                  >
-                    <span className="text-xs font-mono text-accent">{item.method}</span>
-                    <span className="ml-2 text-xs font-mono text-ink-2">{item.url}</span>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <p className="p-3 text-sm text-ink-3">No saved repeater requests.</p>
-            )}
-          </div>
-        </section>
-
-        <section className="space-y-4">
-          <div className="grid lg:grid-cols-2 gap-4">
-            <ResponsePanel title="Left Response" result={leftResult} />
-            <ResponsePanel title="Right Response" result={rightResult} />
-          </div>
-
-          <div className="bg-card border border-border rounded-lg overflow-hidden">
-            <header className="p-3 border-b border-border flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <GitCompare size={15} className="text-accent" />
-                <h2 className="text-sm text-ink font-medium">Response Compare</h2>
-              </div>
-              <button
-                disabled={!leftResult || !rightResult}
-                onClick={() => void compare()}
-                className="px-3 py-1.5 bg-elevated border border-border text-ink rounded text-xs disabled:opacity-40"
-              >
-                Compare
-              </button>
-            </header>
-            {comparison ? (
-              <div className="grid sm:grid-cols-3 gap-3 p-4">
-                <Metric label="Status changed" value={comparison.status_changed ? "Yes" : "No"} />
-                <Metric label="Left / right status" value={`${comparison.left_status} / ${comparison.right_status}`} />
-                <Metric label="Length delta" value={String(comparison.length_delta)} />
-              </div>
-            ) : (
-              <p className="p-4 text-sm text-ink-3">Send two responses to compare status and response length changes.</p>
-            )}
-          </div>
-        </section>
-      </div>
-    </div>
-  )
-}
-
-function ResponsePanel({ title, result }: { title: string; result: ReplayResponse | null }) {
-  return (
-    <div className="bg-card border border-border rounded-lg overflow-hidden">
-      <header className="p-3 border-b border-border text-sm text-ink">{title}</header>
-      {result ? (
-        <div>
-          <div className="grid grid-cols-3 gap-2 p-3 border-b border-border">
-            <Metric label="Status" value={String(result.status)} />
-            <Metric label="Length" value={String(result.length)} />
-            <Metric label="Time" value={`${result.duration_ms} ms`} />
-          </div>
-          <pre className="p-4 text-xs text-ink-2 overflow-auto max-h-[360px]">{result.body}</pre>
         </div>
-      ) : (
-        <p className="p-4 text-sm text-ink-3">No response captured.</p>
-      )}
-    </div>
-  )
-}
+      </CyberCard>
 
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="bg-canvas border border-border rounded p-2">
-      <p className="text-[11px] text-ink-3">{label}</p>
-      <p className="mt-1 text-sm font-mono text-ink">{value}</p>
+      {/* Split Workbench: Request (Left) + Response (Right) */}
+      <div className="grid lg:grid-cols-2 gap-6">
+        {/* Request Editor */}
+        <CyberCard
+          title="HTTP Request Frame"
+          subtitle="Headers & payload buffer"
+          icon={<Terminal size={15} />}
+        >
+          <div className="space-y-4 font-mono text-xs">
+            <div>
+              <span className="text-ink-3 text-[10px] uppercase font-semibold mb-1 block">
+                HEADERS (JSON FORMAT)
+              </span>
+              <textarea
+                value={headers}
+                onChange={(e) => setHeaders(e.target.value)}
+                rows={7}
+                spellCheck={false}
+                className="w-full bg-[#03060c] border border-border rounded p-3 text-xs font-mono text-ink-2 selection:bg-cyan/30 focus:border-cyan/40"
+              />
+            </div>
+
+            <div>
+              <span className="text-ink-3 text-[10px] uppercase font-semibold mb-1 block">
+                PAYLOAD BODY
+              </span>
+              <textarea
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                rows={11}
+                spellCheck={false}
+                placeholder="Raw POST/PUT body..."
+                className="w-full bg-[#03060c] border border-border rounded p-3 text-xs font-mono text-ink-2 selection:bg-cyan/30 focus:border-cyan/40"
+              />
+            </div>
+          </div>
+        </CyberCard>
+
+        {/* Response Viewer */}
+        <CyberCard
+          title="Server Response Analysis"
+          subtitle={
+            currentResult
+              ? `HTTP ${currentResult.status} · ${currentResult.duration_ms}ms · ${currentResult.length} bytes`
+              : "Awaiting transmission"
+          }
+          action={
+            <div className="flex items-center gap-2">
+              <div className="flex items-center bg-surface border border-border rounded p-0.5 text-[10px] font-mono">
+                <button
+                  onClick={() => setActiveSlot("left")}
+                  className={`px-2 py-0.5 rounded ${
+                    activeSlot === "left"
+                      ? "bg-cyan/20 text-cyan font-bold"
+                      : "text-ink-3 hover:text-ink"
+                  }`}
+                >
+                  SLOT A
+                </button>
+                <button
+                  onClick={() => setActiveSlot("right")}
+                  className={`px-2 py-0.5 rounded ${
+                    activeSlot === "right"
+                      ? "bg-cyan/20 text-cyan font-bold"
+                      : "text-ink-3 hover:text-ink"
+                  }`}
+                >
+                  SLOT B
+                </button>
+              </div>
+
+              {leftResult && rightResult && (
+                <CyberButton
+                  size="xs"
+                  variant="outline"
+                  icon={<GitCompare size={11} />}
+                  onClick={() => void compare()}
+                >
+                  DIFF
+                </CyberButton>
+              )}
+            </div>
+          }
+        >
+          {currentResult ? (
+            <div className="space-y-4 font-mono text-xs">
+              {/* Status Header */}
+              <div className="flex items-center gap-3 p-2.5 rounded bg-surface border border-border">
+                <span
+                  className={`font-bold text-xs px-2 py-0.5 rounded ${
+                    currentResult.status >= 200 && currentResult.status < 300
+                      ? "bg-emerald/20 text-emerald"
+                      : currentResult.status >= 400 && currentResult.status < 500
+                        ? "bg-high/20 text-high"
+                        : currentResult.status >= 500
+                          ? "bg-critical/20 text-critical"
+                          : "bg-cyan/20 text-cyan"
+                  }`}
+                >
+                  HTTP {currentResult.status}
+                </span>
+                <span className="text-ink-3">LATENCY: <strong className="text-ink">{currentResult.duration_ms} ms</strong></span>
+                <span className="text-ink-3">SIZE: <strong className="text-ink">{currentResult.length} B</strong></span>
+              </div>
+
+              {/* Response Headers */}
+              <div>
+                <span className="text-ink-3 text-[10px] uppercase font-semibold mb-1 block">
+                  RESPONSE HEADERS
+                </span>
+                <pre className="p-2.5 rounded bg-[#03060c] border border-border text-[11px] text-ink-2 max-h-36 overflow-y-auto whitespace-pre-wrap">
+                  {JSON.stringify(currentResult.headers, null, 2)}
+                </pre>
+              </div>
+
+              {/* Response Body */}
+              <div>
+                <span className="text-ink-3 text-[10px] uppercase font-semibold mb-1 block">
+                  RESPONSE BODY
+                </span>
+                <pre className="p-3.5 rounded bg-[#03060c] border border-border text-xs text-ink-2 max-h-80 overflow-y-auto whitespace-pre-wrap selection:bg-cyan/30">
+                  {currentResult.body || "[Empty Response Body]"}
+                </pre>
+              </div>
+
+              {/* Comparison Results */}
+              {comparison && (
+                <div className="p-3 rounded bg-surface border border-cyan/40 text-xs space-y-1">
+                  <span className="font-bold text-cyan uppercase text-[11px]">DIFFERENTIAL REPORT:</span>
+                  <div className="grid grid-cols-2 gap-2 text-[11px] text-ink-2">
+                    <div>Status Changed: <strong className="text-ink">{comparison.status_changed ? "YES" : "NO"}</strong></div>
+                    <div>Length Delta: <strong className="text-ink">{comparison.length_delta} B</strong></div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="py-20 text-center text-xs font-mono text-ink-3 space-y-2">
+              <p>No response in {activeSlot.toUpperCase()}.</p>
+              <p className="text-[11px]">Click "Transmit Request" to fire an HTTP probe.</p>
+            </div>
+          )}
+        </CyberCard>
+      </div>
     </div>
   )
 }

@@ -1,133 +1,186 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;1,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Rajdhani:wght@500;600;700&display=swap');
 @import 'tailwindcss';
 
 @theme {
-  --color-canvas:      #090c14;
-  --color-surface:     #0d1118;
-  --color-panel:       #0f1420;
-  --color-card:        #131c2a;
-  --color-elevated:    #192636;
-  --color-border:      #1a2030;
-  --color-border-hi:   #242e42;
+  --color-canvas:        #070A12;
+  --color-surface:       #0D111C;
+  --color-panel:         #111827;
+  --color-card:          #0D111C;
+  --color-elevated:      #182235;
+  --color-border:        #252D3D;
+  --color-border-hi:     #344158;
+  --color-border-cyan:   #38BDF840;
 
-  --color-ink:         #dce4f0;
-  --color-ink-2:       #8590a2;
-  --color-ink-3:       #4d5669;
+  --color-ink:           #F1F5F9;
+  --color-ink-2:         #CBD5E1;
+  --color-ink-3:         #94A3B8;
+  --color-ink-disabled:  #64748B;
 
-  --color-accent:      #5a57ff;
-  --color-cyan:        #22b4cc;
-  --color-emerald:     #10b981;
+  --color-primary-blue:  #2563EB;
+  --color-blue:          #3B82F6;
+  --color-accent:        #3B82F6;
+  --color-cyan:          #38BDF8;
+  --color-violet:        #8B5CF6;
+  --color-emerald:       #22C55E;
+  --color-success:       #22C55E;
 
-  --color-critical:    #e54646;
-  --color-high:        #e07833;
-  --color-medium:      #c99a1a;
-  --color-low:         #3d82f6;
-  --color-info:        #64748b;
+  --color-critical:      #F43F5E;
+  --color-critical-dim:  #F43F5E1a;
+  --color-high:          #F97316;
+  --color-high-dim:      #F973161a;
+  --color-medium:        #EAB308;
+  --color-medium-dim:    #EAB3081a;
+  --color-low:           #06B6D4;
+  --color-low-dim:       #06B6D41a;
+  --color-info:          #64748B;
+  --color-info-dim:      #64748B1a;
 
   --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --font-display: 'Rajdhani', 'Inter', sans-serif;
 
   --radius-sm: 2px;
   --radius:    4px;
   --radius-md: 6px;
+  --radius-lg: 8px;
 }
 
 html,
 body {
-  background-color: #090c14;
-  color: #dce4f0;
+  background-color: #070A12;
+  color: #F1F5F9;
   font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
-  font-size: 14px;
+  font-size: 13.5px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
 }
 
 #root {
   min-height: 100vh;
 }
 
+/* ── Cyber Scrollbars ── */
 ::-webkit-scrollbar          { width: 5px; height: 5px; }
-::-webkit-scrollbar-track    { background: transparent; }
-::-webkit-scrollbar-thumb    { background: #1a2030; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #242e42; }
+::-webkit-scrollbar-track    { background: rgba(7, 10, 18, 0.9); }
+::-webkit-scrollbar-thumb    { background: #252D3D; border-radius: 2px; border: 1px solid #111827; }
+::-webkit-scrollbar-thumb:hover { background: #344158; }
 
-* { scrollbar-width: thin; scrollbar-color: #1a2030 transparent; }
+* { scrollbar-width: thin; scrollbar-color: #252D3D #070A12; }
+::selection { background: rgba(37, 99, 235, 0.3); color: #FFFFFF; }
 
-::selection { background: rgba(148, 163, 184, 0.2); }
-
-input:focus,
-textarea:focus,
-select:focus { outline: none; }
-
-/* ── PREMIUM 3D & DEPTH SYSTEM ── */
-.card-3d {
-  position: relative;
-  perspective: 1000px;
-  transform-style: preserve-3d;
-  transition: transform 0.4s cubic-bezier(0.165, 0.84, 0.44, 1), box-shadow 0.4s ease, border-color 0.4s ease;
-}
-.card-3d:hover {
-  transform: translateY(-5px) rotateX(2.5deg) rotateY(-2.5deg);
-  box-shadow: 
-    0 24px 48px -12px rgba(0, 0, 0, 0.65),
-    0 0 30px 2px rgba(90, 87, 255, 0.22),
-    inset 0 1px 1px 0 rgba(255, 255, 255, 0.08);
-  border-color: rgba(90, 87, 255, 0.35);
+/* ── Accessible Focus Rings ── */
+:focus-visible {
+  outline: 2px solid #38BDF8;
+  outline-offset: 2px;
 }
 
-.node-3d {
-  transform-style: preserve-3d;
-  perspective: 800px;
-  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.3s ease;
-}
-.node-3d:hover {
-  transform: scale(1.08) translateZ(12px);
-  filter: drop-shadow(0 0 12px currentColor);
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid #38BDF8;
+  outline-offset: 1px;
+  border-color: #38BDF8;
 }
 
-@keyframes float3d {
-  0%, 100% {
-    transform: translateY(0px) rotateX(0deg) rotateY(0deg) translateZ(0px);
-  }
-  50% {
-    transform: translateY(-6px) rotateX(2deg) rotateY(-2deg) translateZ(8px);
-  }
-}
-.animate-float-3d {
-  animation: float3d 6s ease-in-out infinite;
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid #38BDF8;
+  outline-offset: 2px;
 }
 
-.hologram-panel {
+/* ── Tactical Backgrounds & Grid (Subtle Blue-Gray) ── */
+.bg-grid-cyber {
+  background-image: 
+    linear-gradient(to right, rgba(37, 45, 61, 0.35) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(37, 45, 61, 0.35) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+.bg-dots-cyber {
+  background-image: radial-gradient(rgba(37, 45, 61, 0.5) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+
+/* ── Scanline Effect (Restrained & Accessible) ── */
+.scanline-overlay {
   position: relative;
   overflow: hidden;
 }
-.hologram-panel::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background-size: 20px 20px;
-  background-image: 
-    linear-gradient(to right, rgba(90, 87, 255, 0.03) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(90, 87, 255, 0.03) 1px, transparent 1px);
-  opacity: 0.85;
-}
-.hologram-panel::after {
+.scanline-overlay::after {
   content: "";
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, rgba(90, 87, 255, 0.4), transparent);
-  animation: scanline 4s linear infinite;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(56, 189, 248, 0.25), transparent);
+  animation: cyberScanline 6s linear infinite;
   pointer-events: none;
+  z-index: 20;
 }
 
-@keyframes scanline {
-  0% { transform: translateY(-100%); }
-  100% { transform: translateY(500px); }
+@keyframes cyberScanline {
+  0%   { transform: translateY(-100%); }
+  100% { transform: translateY(800px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scanline-overlay::after {
+    display: none;
+  }
+}
+
+/* ── HUD Corner Accents (Subtle Enterprise) ── */
+.corner-hud {
+  position: relative;
+}
+.corner-hud::before,
+.corner-hud::after {
+  content: "";
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  pointer-events: none;
+  border-color: #344158;
+  transition: border-color 0.2s ease;
+}
+.corner-hud::before {
+  top: -1px;
+  left: -1px;
+  border-top: 2px solid;
+  border-left: 2px solid;
+}
+.corner-hud::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 2px solid;
+  border-right: 2px solid;
+}
+.corner-hud:hover::before,
+.corner-hud:hover::after {
+  border-color: #3B82F6;
+}
+
+/* ── Tactical Glow Shadows (Restrained) ── */
+.glow-cyan-sm {
+  box-shadow: 0 0 10px -2px rgba(56, 189, 248, 0.25);
+}
+.glow-blue-sm {
+  box-shadow: 0 0 12px -2px rgba(37, 99, 235, 0.3);
+}
+.glow-critical-sm {
+  box-shadow: 0 0 10px -2px rgba(244, 63, 94, 0.25);
+}
+
+/* ── Custom Pulse Animations ── */
+@keyframes beaconPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.92); }
+}
+.animate-beacon {
+  animation: beaconPulse 2s ease-in-out infinite;
 }
 
 @media print {
@@ -150,17 +203,6 @@ select:focus { outline: none; }
     z-index: 9999999 !important;
     background: white !important;
     overflow: visible !important;
-  }
-  .pdf-printable-area > div {
-    page-break-after: always !important;
-    page-break-inside: avoid !important;
-    box-shadow: none !important;
-    border: none !important;
-    margin: 0 auto !important;
-    width: 210mm !important;
-    height: 297mm !important;
-    padding: 20mm !important;
-    box-sizing: border-box !important;
   }
 }
 

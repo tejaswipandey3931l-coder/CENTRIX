@@ -1,75 +1,182 @@
 import { useEffect, useState } from "react"
-import { Copy, RefreshCw, Satellite } from "lucide-react"
+import { Copy, RefreshCw, Satellite, Check, Radio } from "lucide-react"
 import { oobApi, scanApi } from "../api/client"
+import { CyberCard } from "../components/ui/CyberCard"
+import { CyberButton } from "../components/ui/CyberButton"
 
 export default function OobMonitor() {
   const [scans, setScans] = useState<any[]>([])
   const [scanId, setScanId] = useState("")
   const [token, setToken] = useState("")
   const [events, setEvents] = useState<any[]>([])
+  const [copied, setCopied] = useState(false)
   const [message, setMessage] = useState("")
+  const [loading, setLoading] = useState(true)
 
   const load = async () => {
-    const [nextScans, nextEvents] = await Promise.all([scanApi.list(), oobApi.events(token || undefined)])
-    setScans(nextScans)
-    if (!scanId && nextScans[0]) setScanId(nextScans[0].id)
-    setEvents(nextEvents)
+    setLoading(true)
+    try {
+      const [nextScans, nextEvents] = await Promise.all([
+        scanApi.list(),
+        oobApi.events(token || undefined),
+      ])
+      setScans(nextScans)
+      if (!scanId && nextScans[0]) setScanId(nextScans[0].id)
+      setEvents(nextEvents)
+    } finally {
+      setLoading(false)
+    }
   }
 
-  useEffect(() => { void load().catch(() => undefined) }, [])
+  useEffect(() => {
+    void load().catch(() => undefined)
+    const interval = setInterval(() => {
+      if (token) void oobApi.events(token).then(setEvents).catch(() => undefined)
+    }, 4000)
+    return () => clearInterval(interval)
+  }, [token])
 
   const create = async () => {
     const result = await oobApi.createToken(scanId)
     setToken(result.token)
-    setMessage("OOB token created. Use a public tunnel if the target must call back from the internet.")
+    setMessage("New Out-of-Band callback token generated. Use a public tunnel if the target must call back from the internet.")
     setEvents([])
   }
 
   const callback = token ? oobApi.callbackUrl(token) : ""
 
+  const copyUrl = async () => {
+    if (!callback) return
+    await navigator.clipboard.writeText(callback)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
+
   return (
-    <div className="p-6 max-w-[1200px] mx-auto space-y-5">
-      <div className="flex items-start justify-between gap-4">
+    <div className="p-4 sm:p-6 lg:p-8 max-w-[1700px] mx-auto space-y-6">
+      {/* Header */}
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-5">
         <div>
-          <h1 className="text-lg font-semibold text-ink">OOB Monitor</h1>
-          <p className="text-sm text-ink-3 mt-1">Generate callback tokens and record out-of-band proof interactions.</p>
+          <h1 className="text-xl font-bold tracking-wider text-ink uppercase font-display flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-cyan shadow-[0_0_8px_#00f0ff]" />
+            Out-of-Band (OOB) Interaction Monitor
+          </h1>
+          <p className="text-xs text-ink-3 font-mono mt-1">
+            Real-time listener for blind SSRF, asynchronous XXE, and DNS/HTTP external callback triggers.
+          </p>
         </div>
-        <button onClick={() => void load()} className="p-2 rounded border border-border text-ink-2"><RefreshCw size={15} /></button>
+
+        <div className="flex items-center gap-2.5">
+          <CyberButton
+            variant="secondary"
+            size="sm"
+            icon={<RefreshCw size={13} className={loading ? "animate-spin" : ""} />}
+            onClick={() => void load()}
+          >
+            REFRESH
+          </CyberButton>
+
+          <CyberButton
+            variant="primary"
+            size="sm"
+            hudCorners
+            icon={<Satellite size={13} />}
+            onClick={() => void create()}
+          >
+            GENERATE OOB TOKEN
+          </CyberButton>
+        </div>
       </div>
 
-      <section className="bg-card border border-border rounded-lg p-4 space-y-3">
-        <div className="grid md:grid-cols-[1fr_auto] gap-3">
-          <select value={scanId} onChange={(event) => setScanId(event.target.value)} className="bg-canvas border border-border rounded px-3 py-2 text-sm text-ink">
-            {scans.map((scan) => <option key={scan.id} value={scan.id}>{scan.id} - {scan.target}</option>)}
-          </select>
-          <button onClick={() => void create()} className="inline-flex items-center gap-2 px-4 py-2 bg-accent text-white rounded text-sm">
-            <Satellite size={15} /> New token
-          </button>
+      {message && (
+        <div className="p-3.5 rounded border border-cyan/40 bg-cyan/10 text-cyan text-xs font-mono">
+          {message}
         </div>
-        {callback && (
-          <div className="flex gap-2">
-            <input readOnly value={callback} className="flex-1 bg-canvas border border-border rounded px-3 py-2 text-xs font-mono text-ink-2" />
-            <button onClick={() => { void navigator.clipboard.writeText(callback); setMessage("Callback URL copied.") }} className="p-2 border border-border rounded text-ink-2"><Copy size={15} /></button>
-          </div>
-        )}
-        {message && <p className="text-xs text-emerald">{message}</p>}
-      </section>
+      )}
 
-      <section className="bg-card border border-border rounded-lg overflow-hidden">
-        <header className="p-3 border-b border-border text-sm font-semibold text-ink">Captured callbacks</header>
-        <div className="divide-y divide-border">
-          {events.length ? events.map((event) => (
-            <article key={event.id} className="p-4">
-              <div className="flex justify-between gap-3">
-                <p className="text-xs font-mono text-accent">{event.method} {event.token}</p>
-                <p className="text-xs text-ink-3">{event.captured_at}</p>
+      {/* Target & Token Card */}
+      <CyberCard
+        title="OOB Callback Configuration"
+        subtitle="Route callback payloads into your active assessment session"
+      >
+        <div className="space-y-3 font-mono text-xs">
+          <div>
+            <label className="block text-ink-3 text-[10px] uppercase font-semibold mb-1">
+              ASSOCIATED AUDIT SCOPE:
+            </label>
+            <select
+              value={scanId}
+              onChange={(e) => setScanId(e.target.value)}
+              className="w-full bg-surface border border-border focus:border-cyan/50 rounded px-2.5 py-1.5 text-ink cursor-pointer max-w-md"
+            >
+              {scans.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.id} - {s.target}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {callback && (
+            <div className="pt-2">
+              <label className="block text-ink-3 text-[10px] uppercase font-semibold mb-1 text-cyan">
+                ACTIVE OOB HTTP CALLBACK ENDPOINT
+              </label>
+              <div className="flex gap-2 max-w-2xl">
+                <input
+                  readOnly
+                  value={callback}
+                  className="flex-1 bg-[#03060c] border border-border focus:border-cyan/50 rounded px-3 py-1.5 text-xs text-ink select-all"
+                />
+                <CyberButton
+                  size="sm"
+                  variant="secondary"
+                  icon={copied ? <Check size={12} className="text-emerald" /> : <Copy size={12} />}
+                  onClick={() => void copyUrl()}
+                >
+                  {copied ? "Copied" : "Copy"}
+                </CyberButton>
               </div>
-              <p className="mt-1 text-xs text-ink-2 break-all">{event.url}</p>
-              {event.body_excerpt && <pre className="mt-2 p-3 bg-canvas border border-border rounded text-xs text-ink-3 whitespace-pre-wrap">{event.body_excerpt}</pre>}
-            </article>
-          )) : <p className="p-4 text-sm text-ink-3">No OOB callbacks captured yet.</p>}
+            </div>
+          )}
         </div>
-      </section>
+      </CyberCard>
+
+      {/* Captured Interactions List */}
+      <CyberCard
+        title="Captured Out-of-Band Hits & Interactions"
+        subtitle={`${events.length} interaction callbacks logged by server`}
+        noPadding
+      >
+        <div className="divide-y divide-border/60 font-mono text-xs">
+          {events.length === 0 ? (
+            <div className="p-16 text-center text-ink-3 italic">
+              <Radio size={24} className="mx-auto mb-2 text-ink-3 animate-pulse opacity-60" />
+              Listener active — awaiting asynchronous callback interaction...
+            </div>
+          ) : (
+            events.map((ev) => (
+              <div key={ev.id} className="p-4 hover:bg-surface/50 transition-colors space-y-1.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-emerald text-xs px-2 py-0.5 rounded bg-emerald/10 border border-emerald/30">
+                      HIT {ev.method}
+                    </span>
+                    <span className="font-semibold text-ink text-xs">{ev.token}</span>
+                  </div>
+                  <span className="text-ink-3 text-[11px]">{ev.captured_at || "Recent"}</span>
+                </div>
+                <p className="text-[11px] text-ink-2 break-all">{ev.url}</p>
+                {ev.body_excerpt && (
+                  <pre className="p-2.5 rounded bg-[#03060c] border border-border text-[11px] text-ink-3 whitespace-pre-wrap">
+                    {ev.body_excerpt}
+                  </pre>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </CyberCard>
     </div>
   )
 }

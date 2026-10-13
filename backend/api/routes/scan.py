@@ -62,10 +62,10 @@ async def start_scan(config: ScanConfig, bg: BackgroundTasks):
     )
 
 
-async def _run_in_background(scan_id: str, config: ScanConfig):
+async def _run_in_background(scan_id: str, config: ScanConfig, resume: bool = False):
     """Wrapper so background_task errors are caught and stored."""
     try:
-        await run_scan(scan_id, config)
+        await run_scan(scan_id, config, resume=resume)
     except Exception as exc:
         state = await store.get_scan(scan_id)
         if state:
@@ -95,6 +95,8 @@ async def scan_status(scan_id: str):
         started_at=state.started_at,
         finished_at=state.finished_at,
         duration_s=dur,
+        checkpoint_stage=state.checkpoint_stage,
+        can_resume=state.can_resume,
     )
 
 
@@ -109,6 +111,40 @@ async def pause_scan(scan_id: str):
         state.status = ScanStatus.running
     await store.update_scan(state)
     return {"scan_id": scan_id, "status": state.status}
+
+
+@router.post("/{scan_id}/resume")
+async def resume_scan(scan_id: str, bg: BackgroundTasks):
+    state = await store.get_scan(scan_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if state.status == ScanStatus.running:
+        return {"scan_id": scan_id, "status": state.status, "message": "Scan is already running"}
+
+    state.status = ScanStatus.running
+    await store.update_scan(state)
+    await store.push_log(scan_id, f"[INFO] Resuming scan {scan_id} from saved checkpoints...")
+    bg.add_task(_run_in_background, scan_id, state.config, resume=True)
+    return {"scan_id": scan_id, "status": state.status, "message": "Scan resumed"}
+
+
+@router.get("/{scan_id}/checkpoints")
+async def get_checkpoints(scan_id: str):
+    state = await store.get_scan(scan_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    checkpoints = await store.list_checkpoints(scan_id)
+    return {"scan_id": scan_id, "checkpoints": checkpoints}
+
+
+@router.get("/{scan_id}/diff/{previous_scan_id}")
+async def diff_scans(scan_id: str, previous_scan_id: str):
+    base = await store.get_scan(previous_scan_id)
+    target = await store.get_scan(scan_id)
+    if not base or not target:
+        raise HTTPException(status_code=404, detail="One or both scans not found")
+    from scanner.diff import compute_scan_diff
+    return await compute_scan_diff(base_scan_id=previous_scan_id, target_scan_id=scan_id)
 
 
 @router.post("/{scan_id}/stop")
@@ -138,3 +174,4 @@ async def list_scans():
         }
         for s in scans
     ]
+

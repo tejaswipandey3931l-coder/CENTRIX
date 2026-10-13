@@ -31,3 +31,6 @@ pip-delete-this-directory.txt
 backend/data/*.db
 backend/data/browser-profiles/
 backend/data/certs/
+backend/tmp/
+output/
+

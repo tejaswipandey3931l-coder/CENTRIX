@@ -8,6 +8,7 @@ Unit tests for the local Threat Intelligence RAG pipeline:
 - RAG engine risk extraction & prompt construction
 - Flask API route validation
 """
+import asyncio
 import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -280,7 +281,7 @@ class TestThreatIntel(unittest.TestCase):
         }
 
         findings = [{"type": "sqli", "url": "http://target.com", "param": "id"}]
-        enriched = enrich_findings_with_ai(findings, rag_engine=mock_engine)
+        enriched = asyncio.run(enrich_findings_with_ai(findings, rag_engine=mock_engine))
 
         self.assertEqual(len(enriched), 1)
         item = enriched[0]

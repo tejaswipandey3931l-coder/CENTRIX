@@ -18,6 +18,15 @@ export default defineConfig(({ mode }) => {
     build: {
       sourcemap: emitSourcemaps ? "inline" : false,
       minify: !emitSourcemaps,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes("three") || id.includes("@react-three")) {
+              return "three-bundle"
+            }
+          },
+        },
+      },
     },
     plugins: [
       react(),

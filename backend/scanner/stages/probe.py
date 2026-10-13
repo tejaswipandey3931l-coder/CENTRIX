@@ -50,7 +50,7 @@ SQLI_ERRORS = [
 
 TRAVERSAL_SIGNATURES = [
     "root:x:0:0", "daemon:x:", "[boot loader]", "windows/system32",
-    "/etc/shadow", "application.properties",
+    "/etc/shadow", "application.properties", "[fonts]", "[extensions]", "[files]",
 ]
 
 SECURITY_HEADERS = [
@@ -87,9 +87,9 @@ async def run(
         await log("[INFO] Passive mode — only header and config checks")
         return await _passive_checks(target, urls, log, sem, timeout)
 
-    # Build list of (url, param) probe targets from crawled URLs
+    # Build list of (url, param) probe targets from crawled URLs and GET forms
     # Each target makes several baseline/payload requests. Cap work before launching tasks.
-    probe_targets = _extract_probe_targets(urls, parameters)[:max(1, max_requests // 6)]
+    probe_targets = _extract_probe_targets(urls, parameters, forms=forms)[:max(1, max_requests // 6)]
     await log(f"[INFO] Generated {len(probe_targets)} probe targets")
 
     all_vulns: list[dict] = []
@@ -123,16 +123,16 @@ async def run(
     # Form-based checks. Wraith treats forms as first-class DAST targets; keep
     # this enabled for standard scans, while skipping password-changing fields.
     if safety in {"standard", "aggressive"} and forms:
-        form_vulns = await _form_probes(forms, log, sem, timeout)
+        form_vulns = await _form_probes(forms, log, sem, timeout, target=target)
         all_vulns.extend(form_vulns)
-        advanced_form_vulns = await _advanced_form_probes(forms, log, sem, timeout, aggressive=safety == "aggressive")
+        advanced_form_vulns = await _advanced_form_probes(forms, log, sem, timeout, aggressive=safety == "aggressive", target=target)
         all_vulns.extend(advanced_form_vulns)
 
     await log(f"[SUCCESS] Probing complete — {len(all_vulns)} potential issues found")
     return all_vulns
 
 
-def _extract_probe_targets(urls: list[str], params: list[str]) -> list[tuple[str, str]]:
+def _extract_probe_targets(urls: list[str], params: list[str], forms: list[dict] | None = None) -> list[tuple[str, str]]:
     """Build (url, param) pairs. Uses set for O(1) dedup."""
     targets: set[tuple[str, str]] = set()
     for url in urls:
@@ -143,66 +143,25 @@ def _extract_probe_targets(urls: list[str], params: list[str]) -> list[tuple[str
                     name = part.split("=")[0]
                     base = url.split("?")[0]
                     targets.add((base, name))
-    # Also add global params against interesting paths
+    # Add GET form inputs as primary probe targets
+    for form in (forms or []):
+        method = str(form.get("method", "GET")).upper()
+        if method == "GET":
+            action = form.get("action", "") or form.get("url", "")
+            fields = form.get("fields") or [{"name": name} for name in form.get("inputs", [])]
+            for f in fields:
+                name = f.get("name")
+                if name and _is_probeable_field(f):
+                    targets.add((action.split("?")[0], name))
+    # Also add global params against interesting paths (case-insensitive)
     interesting = [u for u in urls if any(
-        kw in u for kw in ["/api", "/search", "/export", "/admin", "/user", "/login"]
-    )][:10]
+        kw in u.lower() for kw in ["/api", "/search", "/export", "/admin", "/user", "/login", "/forum", "/thread", "/view", "/item", "/page"]
+    )][:15]
     for url in interesting:
         for param in params[:5]:
             targets.add((url.split("?")[0], param))
     return list(targets)
 
-
-async def _test_sqli(url: str, param: str, sem: asyncio.Semaphore,
-                     log, timeout: int) -> list[dict]:
-    """Boolean-diff + error-string SQL injection detection."""
-    results: list[dict] = []
-    payloads = SQLI_PAYLOADS[:6] if SQLI_PAYLOADS else ["'", "' OR '1'='1", "1 AND 1=1", "1 AND 1=2"]
-
-    async with sem:
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Baseline
-                base_url = f"{url}?{param}=1"
-                async with session.get(base_url, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as r0:
-                    baseline = await r0.text(errors="replace")
-                    base_status = r0.status
-
-                for payload in payloads[:3]:
-                    probe_url = f"{url}?{param}={payload}"
-                    async with session.get(probe_url, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as r1:
-                        body = (await r1.text(errors="replace")).lower()
-                        status = r1.status
-
-                        # Error-based detection
-                        for err in SQLI_ERRORS:
-                            if err in body:
-                                await log(f"[ALERT] Potential SQLi (error-based) — {url} param={param}")
-                                results.append({
-                                    "type": "sqli",
-                                    "url": url,
-                                    "param": param,
-                                    "payload": payload,
-                                    "evidence": f"SQL error string detected: '{err}'",
-                                    "confidence": "Confirmed",
-                                })
-                                return results
-
-                        # Boolean-diff detection
-                        if abs(len(body) - len(baseline)) > 100 and status != base_status:
-                            await log(f"[ALERT] Potential SQLi (boolean-diff) — {url} param={param}")
-                            results.append({
-                                "type": "sqli",
-                                "url": url,
-                                "param": param,
-                                "payload": payload,
-                                "evidence": f"Response differential detected (status {base_status}→{status})",
-                                "confidence": "Tentative",
-                            })
-                            return results
-        except Exception:
-            pass
-    return results
 
 
 async def _test_sqli_v2(url: str, param: str, sem: asyncio.Semaphore,
@@ -223,7 +182,8 @@ async def _test_sqli_v2(url: str, param: str, sem: asyncio.Semaphore,
 
                 for payload in payloads[:4]:
                     async with session.get(url, params={param: payload}, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as response:
-                        body = (await response.text(errors="replace")).lower()
+                        raw_body = await response.text(errors="replace")
+                        body = raw_body.lower()
                     for err in SQLI_ERRORS:
                         if err in body:
                             await log(f"[ALERT] SQLi error proof - {url} param={param}")
@@ -235,6 +195,37 @@ async def _test_sqli_v2(url: str, param: str, sem: asyncio.Semaphore,
                                 "evidence": f"SQL error string detected: '{err}'",
                                 "confidence": "Confirmed",
                             }]
+                    # Catch unhandled backend crash / 0-byte stream abort on single quote
+                    if len(baseline) > 300 and len(raw_body) == 0 and payload in ("'", "\"", "1'"):
+                        async with session.get(url, params={param: "999999"}, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as benign_resp:
+                            benign_body = await benign_resp.text(errors="replace")
+                        if len(benign_body) > 300:
+                            await log(f"[ALERT] SQLi crash/truncation proof - {url} param={param}")
+                            return [{
+                                "type": "sqli",
+                                "url": url,
+                                "param": param,
+                                "payload": payload,
+                                "evidence": f"Single-quote injection broke backend query causing unhandled stream abort (0 bytes vs {len(baseline)} byte baseline)",
+                                "confidence": "Confirmed",
+                                "response_body": raw_body[:2000],
+                            }]
+
+                    # Catch unhandled backend 500 error on single quote when '' repairs query to 200
+                    if base_response.status == 200 and response.status == 500 and payload in ("'", "\"", "1'"):
+                        fix_payload = "''" if payload == "'" else ('""' if payload == '"' else "1''")
+                        async with session.get(url, params={param: fix_payload}, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as fix_resp:
+                            if fix_resp.status == 200:
+                                await log(f"[ALERT] SQLi syntax crash & repair proof - {url} param={param}")
+                                return [{
+                                    "type": "sqli",
+                                    "url": url,
+                                    "param": param,
+                                    "payload": payload,
+                                    "evidence": f"Single-quote injection broke SQL query syntax (HTTP 500 error), while escaped quote '{fix_payload}' restored valid query execution (HTTP 200)",
+                                    "confidence": "Confirmed",
+                                    "response_body": raw_body[:2000],
+                                }]
 
                 for true_payload, false_payload in boolean_pairs:
                     async with session.get(url, params={param: true_payload}, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as true_response:
@@ -243,14 +234,20 @@ async def _test_sqli_v2(url: str, param: str, sem: asyncio.Semaphore,
                     async with session.get(url, params={param: false_payload}, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as false_response:
                         false_body = await false_response.text(errors="replace")
                         false_fp = _response_fingerprint(false_response.status, false_body)
-                    if _fingerprints_similar(base_fp, true_fp) and _fingerprints_different(true_fp, false_fp):
+                    # Classic boolean OR tautology record-expansion differential
+                    is_classic_blind = _fingerprints_similar(base_fp, true_fp) and _fingerprints_different(true_fp, false_fp)
+                    is_expanded_blind = (
+                        _fingerprints_different(true_fp, false_fp)
+                        and (_fingerprints_similar(base_fp, false_fp) or true_fp[1] >= int(base_fp[1] * 1.25))
+                    )
+                    if is_classic_blind or is_expanded_blind:
                         await log(f"[ALERT] SQLi boolean proof - {url} param={param}")
                         return [{
                             "type": "sqli",
                             "url": url,
                             "param": param,
                             "payload": f"{true_payload} / {false_payload}",
-                            "evidence": f"True response matched baseline; false response differed ({true_fp} vs {false_fp})",
+                            "evidence": f"Boolean differential confirmed: TRUE response ({true_fp[1]}b) vs FALSE ({false_fp[1]}b), baseline ({base_fp[1]}b)",
                             "confidence": "Confirmed",
                         }]
         except Exception:
@@ -260,12 +257,17 @@ async def _test_sqli_v2(url: str, param: str, sem: asyncio.Semaphore,
 
 def _response_fingerprint(status: int, body: str) -> tuple[int, int, str]:
     title = ""
-    lowered = body.lower()
+    try:
+        from scanner.validation.baseline import normalize_response_body
+        cleaned = normalize_response_body(body)
+    except Exception:
+        cleaned = body
+    lowered = cleaned.lower()
     start = lowered.find("<title>")
     end = lowered.find("</title>")
     if start != -1 and end != -1 and end > start:
         title = lowered[start + 7:end].strip()[:80]
-    normalized_length = (len(body) // 25) * 25
+    normalized_length = (len(cleaned) // 25) * 25
     return status, normalized_length, title
 
 
@@ -279,7 +281,7 @@ def _fingerprints_different(left: tuple[int, int, str], right: tuple[int, int, s
 
 async def _test_xss(url: str, param: str, sem: asyncio.Semaphore,
                     log, timeout: int) -> list[dict]:
-    """Reflected XSS detection — checks if payload is reflected verbatim."""
+    """Reflected XSS detection — checks if payload is reflected in executable HTML context."""
     results: list[dict] = []
     payloads = XSS_PAYLOADS[:3] if XSS_PAYLOADS else ['<script>alert(1)</script>', '"><img src=x onerror=alert(1)>']
 
@@ -287,9 +289,21 @@ async def _test_xss(url: str, param: str, sem: asyncio.Semaphore,
         for payload in payloads[:2]:
             try:
                 async with aiohttp.ClientSession() as session:
-                    probe_url = f"{url}?{param}={payload}"
-                    async with session.get(probe_url, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as r:
+                    async with session.get(
+                        url,
+                        params={param: payload},
+                        timeout=aiohttp.ClientTimeout(total=timeout),
+                        allow_redirects=False,
+                        ssl=False,
+                    ) as r:
+                        content_type = (r.headers.get("content-type") or "").lower()
+                        # XSS does not execute in non-HTML/XML contexts (e.g. application/json, text/plain)
+                        if "json" in content_type or "plain" in content_type:
+                            continue
                         body = await r.text(errors="replace")
+                        # Ignore safe HTML entity-escaped reflections
+                        if "&lt;script&gt;" in body:
+                            continue
                         if payload in body:
                             await log(f"[ALERT] Reflected XSS found — {url} param={param}")
                             results.append({
@@ -297,8 +311,9 @@ async def _test_xss(url: str, param: str, sem: asyncio.Semaphore,
                                 "url": url,
                                 "param": param,
                                 "payload": payload,
-                                "evidence": f"Payload '{payload[:40]}' reflected in response",
+                                "evidence": f"Payload '{payload[:40]}' reflected in {content_type or 'response'}",
                                 "confidence": "Confirmed",
+                                "response_body": body[:2000],
                             })
                             return results
             except Exception:
@@ -310,16 +325,27 @@ async def _test_traversal(url: str, param: str, sem: asyncio.Semaphore,
                            log, timeout: int) -> list[dict]:
     """Path traversal detection — look for filesystem content signatures."""
     results: list[dict] = []
-    payloads = TRAVERSAL_PAYLOADS[:4] if TRAVERSAL_PAYLOADS else [
-        "../../etc/passwd", "../../../etc/shadow", "..\\..\\windows\\win.ini"
+    traversal_candidates = [
+        "../../../../etc/passwd",
+        "../../../../windows/win.ini",
+        "..\\..\\..\\..\\windows\\win.ini",
+        "../../../../boot.ini",
+        "../../etc/passwd",
+        "../../windows/win.ini",
     ]
+    payloads = traversal_candidates + [p for p in (TRAVERSAL_PAYLOADS or []) if p not in traversal_candidates]
 
     async with sem:
-        for payload in payloads[:3]:
+        for payload in payloads[:6]:
             try:
                 async with aiohttp.ClientSession() as session:
-                    probe_url = f"{url}?{param}={payload}"
-                    async with session.get(probe_url, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as r:
+                    async with session.get(
+                        url,
+                        params={param: payload},
+                        timeout=aiohttp.ClientTimeout(total=timeout),
+                        allow_redirects=False,
+                        ssl=False,
+                    ) as r:
                         body = await r.text(errors="replace")
                         for sig in TRAVERSAL_SIGNATURES:
                             if sig in body:
@@ -331,6 +357,7 @@ async def _test_traversal(url: str, param: str, sem: asyncio.Semaphore,
                                     "payload": payload,
                                     "evidence": f"Filesystem signature '{sig}' found in response",
                                     "confidence": "Confirmed",
+                                    "response_body": body[:2000],
                                 })
                                 return results
             except Exception:
@@ -338,126 +365,6 @@ async def _test_traversal(url: str, param: str, sem: asyncio.Semaphore,
     return results
 
 
-# Final override: keep the Wraith-style form scanner after the legacy helper so
-# this definition is the one Python uses.
-async def _form_probes(forms: list[dict], log, sem: asyncio.Semaphore, timeout: int) -> list[dict]:
-    """Test safe form fields for reflected XSS and error-based SQL injection."""
-    results: list[dict] = []
-    seen: set[tuple[str, str, str]] = set()
-    for form in forms[:20]:
-        action = form.get("action", "")
-        fields = form.get("fields") or [{"name": name, "type": "text", "value": ""} for name in form.get("inputs", [])]
-        if not action or not fields:
-            continue
-        candidates = [field for field in fields if _is_probeable_field(field)]
-        for field in candidates[:4]:
-            inp = field["name"]
-            for vuln_type, payload in [("xss", "<script>alert(1)</script>"), ("sqli", "'")]:
-                key = (action, inp, vuln_type)
-                if key in seen:
-                    continue
-                seen.add(key)
-                async with sem:
-                    try:
-                        async with aiohttp.ClientSession() as session:
-                            data = _form_data(fields, inp, payload)
-                            method = str(form.get("method", "GET")).upper()
-                            async with session.request(
-                                method,
-                                action,
-                                **_submission_kwargs(form, data),
-                                timeout=aiohttp.ClientTimeout(total=timeout),
-                                ssl=False,
-                            ) as response:
-                                body = await response.text(errors="replace")
-                            lowered = body.lower()
-                            if vuln_type == "xss" and payload in body:
-                                await log(f"[ALERT] Reflected XSS found in form - {action} field={inp}")
-                                results.append({
-                                    "type": "xss",
-                                    "url": action,
-                                    "param": inp,
-                                    "payload": payload,
-                                    "evidence": f"Payload reflected after form submission at {action}",
-                                    "confidence": "Confirmed",
-                                })
-                                break
-                            if vuln_type == "sqli":
-                                for err in SQLI_ERRORS:
-                                    if err in lowered:
-                                        await log(f"[ALERT] SQLi error found in form - {action} field={inp}")
-                                        results.append({
-                                            "type": "sqli",
-                                            "url": action,
-                                            "param": inp,
-                                            "payload": payload,
-                                            "evidence": f"SQL error string detected after form submission: '{err}'",
-                                            "confidence": "Confirmed",
-                                        })
-                                        break
-                    except Exception as exc:
-                        await log(f"[WARN] Form probe error {action} field={inp}: {exc}")
-                        pass
-    return results
-
-
-async def _form_probes(forms: list[dict], log, sem: asyncio.Semaphore, timeout: int) -> list[dict]:
-    """Test safe form fields for reflected XSS and error-based SQL injection."""
-    results: list[dict] = []
-    seen: set[tuple[str, str, str]] = set()
-    for form in forms[:20]:
-        action = form.get("action", "")
-        fields = form.get("fields") or [{"name": name, "type": "text", "value": ""} for name in form.get("inputs", [])]
-        if not action or not fields:
-            continue
-        candidates = [field for field in fields if _is_probeable_field(field)]
-        for field in candidates[:4]:
-            inp = field["name"]
-            for vuln_type, payload in [("xss", "<script>alert(1)</script>"), ("sqli", "'")]:
-                key = (action, inp, vuln_type)
-                if key in seen:
-                    continue
-                seen.add(key)
-                async with sem:
-                    try:
-                        async with aiohttp.ClientSession() as session:
-                            data = _form_data(fields, inp, payload)
-                            method = str(form.get("method", "GET")).upper()
-                            if method == "POST":
-                                async with session.post(action, data=data, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as response:
-                                    body = await response.text(errors="replace")
-                            else:
-                                async with session.get(action, params=data, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as response:
-                                    body = await response.text(errors="replace")
-                            lowered = body.lower()
-                            if vuln_type == "xss" and payload in body:
-                                await log(f"[ALERT] Reflected XSS found in form - {action} field={inp}")
-                                results.append({
-                                    "type": "xss",
-                                    "url": action,
-                                    "param": inp,
-                                    "payload": payload,
-                                    "evidence": f"Payload reflected after form submission at {action}",
-                                    "confidence": "Confirmed",
-                                })
-                                break
-                            if vuln_type == "sqli":
-                                for err in SQLI_ERRORS:
-                                    if err in lowered:
-                                        await log(f"[ALERT] SQLi error found in form - {action} field={inp}")
-                                        results.append({
-                                            "type": "sqli",
-                                            "url": action,
-                                            "param": inp,
-                                            "payload": payload,
-                                            "evidence": f"SQL error string detected after form submission: '{err}'",
-                                            "confidence": "Confirmed",
-                                        })
-                                        break
-                    except Exception as exc:
-                        await log(f"[WARN] Form probe error {action} field={inp}: {exc}")
-                        pass
-    return results
 
 
 def _is_probeable_field(field: dict) -> bool:
@@ -693,20 +600,22 @@ async def _test_xxe(url: str, param: str, sem: asyncio.Semaphore,
 
 
 async def _advanced_form_probes(forms: list[dict], log, sem: asyncio.Semaphore,
-                                timeout: int, aggressive: bool = False) -> list[dict]:
+                                timeout: int, aggressive: bool = False, target: str = "") -> list[dict]:
     results: list[dict] = []
     for form in forms[:12]:
         method = str(form.get("method", "GET")).upper()
         if method not in {"POST", "PUT", "PATCH"}:
             continue
-        results.extend(await _test_mass_assignment_form(form, log, sem, timeout))
+        results.extend(await _test_mass_assignment_form(form, log, sem, timeout, target=target))
         if aggressive:
-            results.extend(await _test_race_condition_form(form, log, sem, timeout))
+            results.extend(await _test_race_condition_form(form, log, sem, timeout, target=target))
     return results
 
 
-async def _test_mass_assignment_form(form: dict, log, sem: asyncio.Semaphore, timeout: int) -> list[dict]:
-    action = form.get("action", "")
+async def _test_mass_assignment_form(form: dict, log, sem: asyncio.Semaphore, timeout: int, target: str = "") -> list[dict]:
+    raw_action = form.get("action", "") or form.get("url", "")
+    base = form.get("url") or target
+    action = urljoin(base, raw_action) if base else raw_action
     fields = form.get("fields") or [{"name": name, "type": "text", "value": ""} for name in form.get("inputs", [])]
     if not action or not fields:
         return []
@@ -756,8 +665,10 @@ async def _test_mass_assignment_form(form: dict, log, sem: asyncio.Semaphore, ti
     return []
 
 
-async def _test_race_condition_form(form: dict, log, sem: asyncio.Semaphore, timeout: int) -> list[dict]:
-    action = form.get("action", "")
+async def _test_race_condition_form(form: dict, log, sem: asyncio.Semaphore, timeout: int, target: str = "") -> list[dict]:
+    raw_action = form.get("action", "") or form.get("url", "")
+    base = form.get("url") or target
+    action = urljoin(base, raw_action) if base else raw_action
     fields = form.get("fields") or [{"name": name, "type": "text", "value": ""} for name in form.get("inputs", [])]
     candidates = [field for field in fields if _is_probeable_field(field)]
     if not action or not candidates:
@@ -858,56 +769,21 @@ async def _passive_checks(target: str, urls: list[str], log, sem: asyncio.Semaph
     return []
 
 
-async def _form_probes(forms: list[dict], log, sem: asyncio.Semaphore, timeout: int) -> list[dict]:
-    """Test form submissions for XSS/SQLi — aggressive mode only."""
-    results: list[dict] = []
-    for form in forms[:5]:
-        action = form.get("action", "")
-        inputs = form.get("inputs", [])
-        if not action or not inputs:
-            continue
-        for inp in inputs[:2]:
-            for payload in ['<script>alert(1)</script>', "' OR '1'='1"]:
-                async with sem:
-                    try:
-                        async with aiohttp.ClientSession() as session:
-                            data = {inp: payload}
-                            method = form.get("method", "GET")
-                            if method == "POST":
-                                async with session.post(action, data=data,
-                                    timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as r:
-                                    body = await r.text(errors="replace")
-                            else:
-                                async with session.get(action, params=data,
-                                    timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as r:
-                                    body = await r.text(errors="replace")
-                            if payload in body:
-                                results.append({
-                                    "type": "xss",
-                                    "url": action,
-                                    "param": inp,
-                                    "payload": payload,
-                                    "evidence": f"Reflected in form submission at {action}",
-                                    "confidence": "Confirmed",
-                                })
-                    except Exception:
-                        pass
-    return results
-
-
-async def _form_probes(forms: list[dict], log, sem: asyncio.Semaphore, timeout: int) -> list[dict]:
+async def _form_probes(forms: list[dict], log, sem: asyncio.Semaphore, timeout: int, target: str = "") -> list[dict]:
     """Test safe form fields for reflected XSS and error-based SQL injection."""
     results: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
     for form in forms[:20]:
-        action = form.get("action", "")
+        raw_action = form.get("action", "") or form.get("url", "")
+        base = form.get("url") or target
+        action = urljoin(base, raw_action) if base else raw_action
         fields = form.get("fields") or [{"name": name, "type": "text", "value": ""} for name in form.get("inputs", [])]
         if not action or not fields:
             continue
         candidates = [field for field in fields if _is_probeable_field(field)]
         for field in candidates[:4]:
             inp = field["name"]
-            for vuln_type, payload in [("xss", "<script>alert(1)</script>"), ("sqli", "'")]:
+            for vuln_type, payload in [("xss", "<script>alert(1)</script>"), ("sqli", "centrix'")]:
                 key = (action, inp, vuln_type)
                 if key in seen:
                     continue
@@ -917,25 +793,38 @@ async def _form_probes(forms: list[dict], log, sem: asyncio.Semaphore, timeout: 
                         async with aiohttp.ClientSession() as session:
                             data = _form_data(fields, inp, payload)
                             method = str(form.get("method", "GET")).upper()
-                            if method == "POST":
-                                async with session.post(action, data=data, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as response:
-                                    body = await response.text(errors="replace")
-                            else:
-                                async with session.get(action, params=data, timeout=aiohttp.ClientTimeout(total=timeout), ssl=False) as response:
-                                    body = await response.text(errors="replace")
+                            kwargs = _submission_kwargs(form, data)
+                            async with session.request(
+                                method,
+                                action,
+                                **kwargs,
+                                timeout=aiohttp.ClientTimeout(total=timeout),
+                                allow_redirects=False,
+                                ssl=False,
+                            ) as response:
+                                content_type = (response.headers.get("content-type") or "").lower()
+                                body = await response.text(errors="replace")
+
                             lowered = body.lower()
-                            if vuln_type == "xss" and payload in body:
-                                await log(f"[ALERT] Reflected XSS found in form - {action} field={inp}")
-                                results.append({
-                                    "type": "xss",
-                                    "url": action,
-                                    "param": inp,
-                                    "payload": payload,
-                                    "evidence": f"Payload reflected after form submission at {action}",
-                                    "confidence": "Confirmed",
-                                })
-                                break
-                            if vuln_type == "sqli":
+                            if vuln_type == "xss":
+                                # Avoid false positives: ignore non-HTML/XML contexts or HTML entity escaped reflections
+                                if "json" in content_type or "plain" in content_type:
+                                    continue
+                                if "&lt;script&gt;" in body:
+                                    continue
+                                if payload in body:
+                                    await log(f"[ALERT] Reflected XSS found in form - {action} field={inp}")
+                                    results.append({
+                                        "type": "xss",
+                                        "url": action,
+                                        "param": inp,
+                                        "payload": payload,
+                                        "evidence": f"Payload reflected after form submission at {action}",
+                                        "confidence": "Confirmed",
+                                        "response_body": body[:2000],
+                                    })
+                            elif vuln_type == "sqli":
+                                found_error = False
                                 for err in SQLI_ERRORS:
                                     if err in lowered:
                                         await log(f"[ALERT] SQLi error found in form - {action} field={inp}")
@@ -946,8 +835,28 @@ async def _form_probes(forms: list[dict], log, sem: asyncio.Semaphore, timeout: 
                                             "payload": payload,
                                             "evidence": f"SQL error string detected after form submission: '{err}'",
                                             "confidence": "Confirmed",
+                                            "response_body": body[:2000],
                                         })
+                                        found_error = True
                                         break
+                                if not found_error and response.status == 500:
+                                    fix_data = _form_data(fields, inp, "centrix''")
+                                    fix_kwargs = _submission_kwargs(form, fix_data)
+                                    async with session.request(
+                                        method, action, **fix_kwargs,
+                                        timeout=aiohttp.ClientTimeout(total=timeout), ssl=False
+                                    ) as fix_r:
+                                        if fix_r.status == 200:
+                                            await log(f"[ALERT] SQLi syntax crash & repair found in form - {action} field={inp}")
+                                            results.append({
+                                                "type": "sqli",
+                                                "url": action,
+                                                "param": inp,
+                                                "payload": payload,
+                                                "evidence": f"Single-quote submission caused HTTP 500 database error, repaired to HTTP 200 by escaped quote",
+                                                "confidence": "Confirmed",
+                                                "response_body": body[:2000],
+                                            })
                     except Exception as exc:
                         await log(f"[WARN] Form probe error {action} field={inp}: {exc}")
                         pass

@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Enums ─────────────────────────────────────────────────────────
@@ -32,6 +32,21 @@ class ScanStatus(str, Enum):
 
 
 class ScanStage(str, Enum):
+    # Durable State Machine stages
+    created = "created"
+    authorization_pending = "authorization_pending"
+    planning = "planning"
+    discovering = "discovering"
+    crawling = "crawling"
+    browser_testing = "browser_testing"
+    passive_analysis = "passive_analysis"
+    active_testing = "active_testing"
+    validating = "validating"
+    adjudicating = "adjudicating"
+    reporting = "reporting"
+    completed = "completed"
+
+    # Legacy aliases for compatibility
     validate = "validate"
     discover = "discover"
     crawl = "crawl"
@@ -54,6 +69,16 @@ class FindingStatus(str, Enum):
     in_review = "In Review"
     fixed = "Fixed"
     accepted = "Accepted"
+    still_open = "Still Open"
+    needs_review = "Needs Review"
+
+
+class FindingClassification(str, Enum):
+    confirmed = "Confirmed"
+    probable = "Probable"
+    tentative = "Tentative"
+    informational = "Informational"
+    rejected = "Rejected"
 
 
 # ── Scan Configuration ────────────────────────────────────────────
@@ -75,6 +100,8 @@ class ScanConfig(BaseModel):
     auth_token: Optional[str] = None
     label: Optional[str] = None
     environment: str = "Production"
+    retest_finding_id: Optional[str] = None
+    base_scan_id: Optional[str] = None
 
 
 # ── Scan State ────────────────────────────────────────────────────
@@ -91,6 +118,8 @@ class ScanState(BaseModel):
     finished_at: Optional[datetime] = None
     error_msg: Optional[str] = None
     duration_s: Optional[float] = None
+    checkpoint_stage: Optional[str] = None
+    can_resume: bool = False
 
 
 # ── Finding ───────────────────────────────────────────────────────
@@ -101,15 +130,49 @@ class Finding(BaseModel):
     severity: Severity
     category: str
     target: str
-    parameter: str
-    confidence: Literal["Confirmed", "Tentative", "Informational"] = "Tentative"
+    parameter: str = ""
+    confidence: Literal["Confirmed", "Probable", "Tentative", "Informational", "Rejected"] = "Tentative"
+    classification: FindingClassification = FindingClassification.tentative
     status: FindingStatus = FindingStatus.open
     found_at: datetime = Field(default_factory=datetime.utcnow)
-    description: str
-    recommendation: str
-    evidence: str
+    description: str = ""
+    recommendation: str = ""
+    evidence: str = ""
     cwe: Optional[str] = None
     cvss: Optional[float] = None
+
+    # Evidence-based pipeline fields
+    vuln_type: str = "unknown"
+    detection_source: str = "dast_engine"
+    detection_rule: Optional[str] = None
+    evidence_artifact_ids: list[str] = Field(default_factory=list)
+    request_response_refs: list[str] = Field(default_factory=list)
+    reproduction_status: str = "untested"  # reproduced, untested, failed
+    confidence_score: int = 4              # deterministic score 0-10
+    confidence_reasons: list[str] = Field(default_factory=list)
+    false_positive_indicators: list[str] = Field(default_factory=list)
+    validation_status: str = "pending"     # validated, pending, rejected
+    model_review_status: str = "unreviewed"# adjudicated, unreviewed
+    human_review_status: str = "unreviewed"# unreviewed, approved, rejected
+    why_false_positive_risk: Optional[str] = None
+    affected_urls_count: int = 1
+    example_urls: list[str] = Field(default_factory=list)
+    request_method: str = "GET"
+    request_headers: dict[str, str] = Field(default_factory=dict)
+    request_body: Optional[str] = None
+    reproduction_curl: Optional[str] = None
+
+    @model_validator(mode="after")
+    def enforce_evidence_for_confirmation(self) -> "Finding":
+        """Safety invariant: A finding cannot be Confirmed without evidence."""
+        if self.classification == FindingClassification.confirmed:
+            if not self.evidence_artifact_ids:
+                self.classification = FindingClassification.tentative
+                self.confidence = "Tentative"
+                self.confidence_reasons.append("Downgraded from Confirmed: Missing persisted evidence artifact.")
+                if not self.why_false_positive_risk:
+                    self.why_false_positive_risk = "Finding lacked direct verifiable evidence artifact."
+        return self
 
 
 class EvidenceArtifact(BaseModel):
@@ -117,6 +180,8 @@ class EvidenceArtifact(BaseModel):
     scan_id: str
     url: str
     method: str = "GET"
+    request_headers: dict[str, str] = Field(default_factory=dict)
+    request_body: Optional[str] = None
     status_code: int
     content_type: str = ""
     response_length: int = 0
@@ -128,7 +193,7 @@ class EvidenceArtifact(BaseModel):
 # ── Report ────────────────────────────────────────────────────────
 class ReportConfig(BaseModel):
     scan_id: str
-    format: Literal["json", "html", "pdf", "sarif", "junit", "evidence"] = "json"
+    format: Literal["json", "html", "pdf", "sarif", "junit", "evidence", "github_issues", "jira"] = "json"
     report_type: Literal["technical", "executive", "compliance"] = "technical"
     target_scope: Optional[str] = None
 
@@ -198,6 +263,27 @@ class AuthMatrixRunRequest(BaseModel):
     profile_ids: list[str] = Field(default_factory=list, max_length=6)
 
 
+# ── Differential Scanning Models ──────────────────────────────────
+class FindingDiffItem(BaseModel):
+    finding_id: str
+    title: str
+    severity: Severity
+    target: str
+    parameter: str = ""
+    cwe: Optional[str] = None
+
+
+class DifferentialScanResult(BaseModel):
+    base_scan_id: str
+    target_scan_id: str
+    new_findings: list[FindingDiffItem] = Field(default_factory=list)
+    resolved_findings: list[FindingDiffItem] = Field(default_factory=list)
+    recurrent_findings: list[FindingDiffItem] = Field(default_factory=list)
+    total_new: int = 0
+    total_resolved: int = 0
+    total_recurrent: int = 0
+
+
 # ── API Responses ──────────────────────────────────────────────────
 class StartScanResponse(BaseModel):
     scan_id: str
@@ -216,3 +302,5 @@ class ScanStatusResponse(BaseModel):
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
     duration_s: Optional[float]
+    checkpoint_stage: Optional[str] = None
+    can_resume: bool = False

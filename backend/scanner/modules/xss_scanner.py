@@ -51,8 +51,6 @@ REFLECTED_PAYLOADS = [
     '<iframe srcdoc="<script>alert(\'{MARKER}\')</script>">',
     'javascript:alert("{MARKER}")',
     '"><body onload=alert("{MARKER}")>',
-    # HTML entity bypass
-    '&lt;script&gt;alert("{MARKER}")&lt;/script&gt;',
     # Polyglot
     'jaVasCript:/*-/*`/*\\`/*\'/*"/**/(/* */oNcliCk=alert("{MARKER}") )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert("{MARKER}")//>>',
 ]
@@ -1046,20 +1044,20 @@ class XSSScanner:
         if marker not in body:
             return None
 
+        stripped = body.strip()
+        if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith("[") and stripped.endswith("]")):
+            return None
+
         raw_present = payload in body
         if not raw_present:
             return None
 
-        decoded_body = unescape(body)
-        idx = decoded_body.find(marker)
+        idx = body.find(marker)
         if idx == -1:
-            idx = body.find(marker)
-            haystack = body
-        else:
-            haystack = decoded_body
+            return None
 
-        surrounding = haystack[max(0, idx - 180):idx + 180]
-        context = self._detect_context(haystack, marker)
+        surrounding = body[max(0, idx - 180):idx + 180]
+        context = self._detect_context(body, marker)
 
         if context in {"javascript", "event-handler", "url-attribute"}:
             return context

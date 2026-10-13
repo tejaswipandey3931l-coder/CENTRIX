@@ -31,9 +31,15 @@ class PushFindingRequest(BaseModel):
     note: str = ""
 
 
+from integrations.github import GitHubClient
+from integrations.jira import JiraClient
+
+
 @router.get("/status")
 async def integration_status():
     nuclei_path = shutil.which("nuclei")
+    gh = GitHubClient()
+    jira = JiraClient()
     return {
         "nuclei": {
             "available": nuclei_path is not None,
@@ -42,7 +48,8 @@ async def integration_status():
             "mode": "nuclei-binary" if nuclei_path else "centrix-builtin-templates",
         },
         "cve_lookup": {"available": True, "provider": "NVD"},
-        "github": {"configured": bool(os.getenv("GITHUB_TOKEN"))},
+        "github": {"configured": gh.is_configured(), "repo": gh.repo or None},
+        "jira": {"configured": jira.is_configured(), "project": jira.project_key or None},
         "slack": {"configured": bool(os.getenv("SLACK_WEBHOOK_URL"))},
     }
 
@@ -57,6 +64,7 @@ async def push_finding(finding_id: str, request: PushFindingRequest):
     finding = await store.get_finding(finding_id)
     if not finding:
         raise HTTPException(status_code=404, detail="Finding not found")
+    scan = await store.get_scan(finding.scan_id)
     item_id = f"OUT-{uuid.uuid4().hex[:8].upper()}"
     payload = {
         "id": item_id,
@@ -78,8 +86,26 @@ async def push_finding(finding_id: str, request: PushFindingRequest):
             payload["status"] = "sent"
         else:
             payload["status"] = "queued-missing-webhook"
-    elif request.destination in {"github", "jira"}:
-        payload["status"] = "queued-missing-connector"
+    elif request.destination == "github":
+        gh_client = GitHubClient()
+        res = await gh_client.create_issue(finding, scan)
+        payload["status"] = res["status"]
+        if res.get("issue_id"):
+            payload["external_id"] = str(res["issue_id"])
+        if res.get("html_url") or res.get("issue_url"):
+            payload["external_url"] = res.get("html_url") or res.get("issue_url")
+        if res.get("error"):
+            payload["error"] = res["error"]
+    elif request.destination == "jira":
+        jira_client = JiraClient()
+        res = await jira_client.create_issue(finding, scan)
+        payload["status"] = res["status"]
+        if res.get("issue_key"):
+            payload["external_id"] = res["issue_key"]
+        if res.get("issue_url"):
+            payload["external_url"] = res["issue_url"]
+        if res.get("error"):
+            payload["error"] = res["error"]
     else:
         payload["status"] = "saved"
 

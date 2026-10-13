@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,7 @@ def _init_db() -> None:
             CREATE TABLE IF NOT EXISTS scheduled_scans (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS scan_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, scan_id TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS scan_checkpoints (id TEXT PRIMARY KEY, scan_id TEXT NOT NULL, stage TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
         """)
     _initialized = True
 
@@ -342,3 +344,60 @@ async def list_reports() -> list[dict[str, Any]]:
     with _connection() as conn:
         rows = conn.execute("SELECT payload FROM reports ORDER BY id DESC").fetchall()
     return [json.loads(row["payload"]) for row in rows]
+
+
+async def save_checkpoint(scan_id: str, stage: str, data: dict[str, Any]) -> str:
+    checkpoint_id = f"chk-{uuid.uuid4().hex[:10]}"
+    async with _get_lock():
+        _init_db()
+        with _connection() as conn:
+            conn.execute(
+                "INSERT INTO scan_checkpoints (id, scan_id, stage, payload) VALUES (?, ?, ?, ?)",
+                (checkpoint_id, scan_id, stage, _json(data)),
+            )
+    return checkpoint_id
+
+
+async def get_latest_checkpoint(scan_id: str) -> dict[str, Any] | None:
+    _init_db()
+    with _connection() as conn:
+        row = conn.execute(
+            "SELECT id, scan_id, stage, payload, created_at FROM scan_checkpoints WHERE scan_id = ? ORDER BY rowid DESC LIMIT 1",
+            (scan_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "scan_id": row["scan_id"],
+        "stage": row["stage"],
+        "data": json.loads(row["payload"]),
+        "created_at": row["created_at"],
+    }
+
+
+async def list_checkpoints(scan_id: str) -> list[dict[str, Any]]:
+    _init_db()
+    with _connection() as conn:
+        rows = conn.execute(
+            "SELECT id, scan_id, stage, payload, created_at FROM scan_checkpoints WHERE scan_id = ? ORDER BY rowid ASC",
+            (scan_id,),
+        ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "scan_id": r["scan_id"],
+            "stage": r["stage"],
+            "data": json.loads(r["payload"]),
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
+
+
+async def clear_checkpoints(scan_id: str) -> None:
+    async with _get_lock():
+        _init_db()
+        with _connection() as conn:
+            conn.execute("DELETE FROM scan_checkpoints WHERE scan_id = ?", (scan_id,))
+

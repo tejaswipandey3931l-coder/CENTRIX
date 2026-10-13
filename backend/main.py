@@ -11,7 +11,7 @@ import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import scan, findings, reports, ws, manual, imports, evidence, integrations, proof, authz, oob, schedules
+from api.routes import scan, findings, reports, ws, manual, imports, evidence, integrations, proof, authz, oob, schedules, agent
 
 app = FastAPI(
     title="VulnGuard API",
@@ -47,6 +47,7 @@ app.include_router(proof.router)
 app.include_router(authz.router)
 app.include_router(oob.router)
 app.include_router(schedules.router)
+app.include_router(agent.router)
 
 
 try:
@@ -82,6 +83,26 @@ async def start_local_scheduler():
             start_scheduler()
     except Exception as exc:
         print(f"[WARN] Could not start threat intel scheduler: {exc}")
+
+    # Cleanup orphaned scans left in pending/running state from a previous server run.
+    # Without this, every restart leaves "ghost" scans that the frontend picks up as active.
+    try:
+        import db.store as store
+        from api.models import ScanStatus
+        from datetime import datetime
+        all_scans = await store.list_scans()
+        cleaned = 0
+        for scan in all_scans:
+            if scan.status in (ScanStatus.pending, ScanStatus.running):
+                scan.status = ScanStatus.stopped
+                scan.error_msg = "Scan interrupted by server restart"
+                scan.finished_at = datetime.utcnow()
+                await store.update_scan(scan)
+                cleaned += 1
+        if cleaned:
+            print(f"[STARTUP] Marked {cleaned} orphaned scan(s) as stopped (server restart)")
+    except Exception as exc:
+        print(f"[WARN] Startup scan cleanup failed: {exc}")
 
 
 @app.get("/")

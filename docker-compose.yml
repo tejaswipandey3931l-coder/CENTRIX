@@ -3,10 +3,23 @@ services:
     build: ./backend
     environment:
       CENTRIX_DB_PATH: /app/data/centrix.db
+      XKIRO_API_KEY: ${XKIRO_API_KEY}
+      AI_PROVIDER: xkiro
+      AI_BASE_URL: https://api.xkiro.com/v1
+      AI_PRIMARY_MODEL: minimax/minimax-m3:free
+      AI_CODING_MODEL: qwen/qwen3-coder-plus:free
+      AI_VISION_MODEL: qwen/qwen3-vl-plus:free
+      AI_FAST_MODEL: qwen/qwen3.5-flash:free
+      AI_MAX_STEPS: 100
+      AI_REQUEST_TIMEOUT: 120
+      AI_REQUIRE_APPROVAL_FOR_ACTIVE_TESTS: "true"
+      AI_MAX_REQUESTS_PER_SCAN: 500
+      AI_MAX_CONCURRENT_REQUESTS: 5
     volumes:
       - centrix-data:/app/data
     ports:
       - "8000:8000"
+
   web:
     build: ./FrontEnd
     environment:

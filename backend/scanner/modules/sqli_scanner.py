@@ -927,9 +927,14 @@ class SQLiScanner:
     # ------------------------------------------------------------------
 
     def _fingerprint(self, body: str) -> Tuple[int, str]:
-        """Content fingerprint: (length, first 500 chars normalized)."""
-        normalized = re.sub(r'\s+', ' ', body.lower())
-        return (len(body), normalized[:500])
+        """Content fingerprint: (length, first 500 chars normalized) with dynamic noise stripped."""
+        try:
+            from scanner.validation.baseline import normalize_response_body
+            cleaned = normalize_response_body(body)
+        except Exception:
+            cleaned = body
+        normalized = re.sub(r'\s+', ' ', cleaned.lower())
+        return (len(normalized), normalized[:500])
 
     def _fingerprints_similar(self, fp1: Tuple, fp2: Tuple,
                                len_tolerance: int = 50) -> bool:

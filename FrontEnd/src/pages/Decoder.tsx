@@ -1,60 +1,162 @@
 import { useState } from "react"
-import { Wand2 } from "lucide-react"
+import { Wand2, Copy, Check, ArrowRightLeft } from "lucide-react"
 import { manualApi } from "../api/client"
+import { CyberCard } from "../components/ui/CyberCard"
+import { CyberButton } from "../components/ui/CyberButton"
 
 const MODES = [
-  ["url-decode", "URL decode"],
-  ["url-encode", "URL encode"],
-  ["base64-decode", "Base64 decode"],
-  ["base64-encode", "Base64 encode"],
-  ["json-pretty", "Pretty JSON"],
-  ["hash-sha256", "SHA-256"],
+  ["url-decode", "URL Decode"],
+  ["url-encode", "URL Encode"],
+  ["base64-decode", "Base64 Decode"],
+  ["base64-encode", "Base64 Encode"],
+  ["json-pretty", "Beautify JSON"],
+  ["hash-sha256", "SHA-256 Digest"],
 ]
 
 export default function Decoder() {
   const [mode, setMode] = useState("url-decode")
   const [input, setInput] = useState("")
   const [output, setOutput] = useState("")
+  const [copied, setCopied] = useState(false)
+  const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
 
   const run = async () => {
     setError("")
+    setBusy(true)
     try {
       const result = await manualApi.decode(mode, input)
       setOutput(result.output)
-    } catch (reason: any) {
-      setError(reason.message || "Decode failed.")
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : "Transformation failed. Ensure input is formatted correctly.")
+    } finally {
+      setBusy(false)
     }
   }
 
+  const copyOutput = async () => {
+    try {
+      await navigator.clipboard.writeText(output)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // ignore
+    }
+  }
+
+  const swap = () => {
+    setInput(output)
+    setOutput("")
+  }
+
   return (
-    <div className="p-6 max-w-[1200px] mx-auto space-y-5">
-      <div>
-        <h1 className="text-lg font-semibold text-ink">Decoder</h1>
-        <p className="text-sm text-ink-3 mt-1">Encode, decode, pretty-print, and hash payloads while testing.</p>
+    <div className="p-4 sm:p-6 lg:p-8 max-w-[1700px] mx-auto space-y-6">
+      {/* Header */}
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-5">
+        <div>
+          <h1 className="text-xl font-bold tracking-wider text-ink uppercase font-display flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-blue" />
+            Payload Decoder & Transformer Studio
+          </h1>
+          <p className="text-xs text-ink-3 font-mono mt-1">
+            Encode, decode, hash, and format payloads and obfuscated attack strings during testing.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2.5">
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value)}
+            className="bg-panel border border-border focus:border-cyan/50 rounded px-3 py-1.5 text-xs font-mono text-ink cursor-pointer"
+          >
+            {MODES.map(([id, label]) => (
+              <option key={id} value={id}>
+                {label}
+              </option>
+            ))}
+          </select>
+
+          <CyberButton
+            variant="primary"
+            size="sm"
+            hudCorners
+            loading={busy}
+            icon={<Wand2 size={13} />}
+            onClick={() => void run()}
+          >
+            TRANSFORM BUFFER
+          </CyberButton>
+        </div>
       </div>
-      <div className="bg-card border border-border rounded-lg p-4 flex flex-wrap gap-3 items-center">
-        <select value={mode} onChange={(event) => setMode(event.target.value)} className="bg-canvas border border-border rounded px-3 py-2 text-sm text-ink">
-          {MODES.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
-        </select>
-        <button onClick={() => void run()} className="inline-flex items-center gap-2 px-4 py-2 bg-accent text-white rounded text-sm">
-          <Wand2 size={15} /> Transform
-        </button>
-        {error && <p className="text-xs text-critical">{error}</p>}
-      </div>
-      <div className="grid lg:grid-cols-2 gap-5">
-        <TextPanel title="Input" value={input} setValue={setInput} />
-        <TextPanel title="Output" value={output} setValue={setOutput} />
+
+      {error && (
+        <div className="p-3.5 rounded border border-critical/40 bg-critical/10 text-critical text-xs font-mono">
+          {error}
+        </div>
+      )}
+
+      {/* Side-by-Side Panels */}
+      <div className="grid lg:grid-cols-2 gap-6 font-mono text-xs">
+        {/* Input Panel */}
+        <CyberCard
+          title="Input Payload Buffer"
+          subtitle="Raw input bytes or string"
+          action={
+            input && (
+              <CyberButton size="xs" variant="ghost" onClick={() => setInput("")}>
+                Clear
+              </CyberButton>
+            )
+          }
+        >
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            rows={18}
+            spellCheck={false}
+            placeholder="Paste raw string, encoded token, or minified JSON here..."
+            className="w-full bg-[#03060c] border border-border rounded p-3 text-xs font-mono text-ink selection:bg-cyan/30 focus:border-cyan/40"
+          />
+        </CyberCard>
+
+        {/* Output Panel */}
+        <CyberCard
+          title="Transformed Output"
+          subtitle="Processed buffer output"
+          action={
+            output && (
+              <div className="flex items-center gap-2">
+                <CyberButton
+                  size="xs"
+                  variant="secondary"
+                  icon={<ArrowRightLeft size={11} />}
+                  onClick={swap}
+                >
+                  Send to Input
+                </CyberButton>
+
+                <CyberButton
+                  size="xs"
+                  variant="outline"
+                  icon={copied ? <Check size={11} className="text-emerald" /> : <Copy size={11} />}
+                  onClick={() => void copyOutput()}
+                >
+                  {copied ? "Copied" : "Copy"}
+                </CyberButton>
+              </div>
+            )
+          }
+        >
+          <textarea
+            value={output}
+            readOnly
+            rows={18}
+            spellCheck={false}
+            placeholder="Transformed output will appear here after clicking Transform..."
+            className="w-full bg-[#03060c] border border-border rounded p-3 text-xs font-mono text-cyan selection:bg-cyan/30"
+          />
+        </CyberCard>
       </div>
     </div>
-  )
-}
-
-function TextPanel({ title, value, setValue }: { title: string; value: string; setValue: (value: string) => void }) {
-  return (
-    <section className="bg-card border border-border rounded-lg overflow-hidden">
-      <header className="p-3 border-b border-border text-sm font-semibold text-ink">{title}</header>
-      <textarea value={value} onChange={(event) => setValue(event.target.value)} spellCheck={false} className="w-full h-[520px] bg-card p-4 text-xs font-mono text-ink-2 resize-none" />
-    </section>
   )
 }

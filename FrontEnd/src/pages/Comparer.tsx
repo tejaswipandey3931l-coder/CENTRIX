@@ -1,96 +1,215 @@
 import { useEffect, useState } from "react"
 import { GitCompare } from "lucide-react"
-import { manualApi, scanApi } from "../api/client"
+import { manualApi, scanApi, type ScanItem, type CorpusItem, type CompareResult } from "../api/client"
+import { CyberCard } from "../components/ui/CyberCard"
+import { CyberButton } from "../components/ui/CyberButton"
+import { StatWidget } from "../components/ui/StatWidget"
 
 export default function Comparer() {
-  const [scans, setScans] = useState<any[]>([])
+  const [scans, setScans] = useState<ScanItem[]>([])
   const [scanId, setScanId] = useState("")
-  const [items, setItems] = useState<any[]>([])
+  const [items, setItems] = useState<CorpusItem[]>([])
   const [leftId, setLeftId] = useState("")
   const [rightId, setRightId] = useState("")
-  const [result, setResult] = useState<any>(null)
+  const [result, setResult] = useState<CompareResult | null>(null)
+  const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
 
   useEffect(() => {
-    void scanApi.list().then((next) => {
-      setScans(next)
-      if (next[0]) setScanId(next[0].id)
-    }).catch(() => undefined)
+    void scanApi
+      .list()
+      .then((next) => {
+        setScans(next)
+        if (next[0]) setScanId(next[0].id)
+      })
+      .catch(() => undefined)
   }, [])
 
   useEffect(() => {
     if (!scanId) return
-    void manualApi.corpus(scanId).then((next) => {
-      setItems(next)
-      setLeftId(next[0]?.id || "")
-      setRightId(next[1]?.id || next[0]?.id || "")
-    }).catch(() => setItems([]))
+    void manualApi
+      .corpus(scanId)
+      .then((next) => {
+        setItems(next)
+        setLeftId(next[0]?.id || "")
+        setRightId(next[1]?.id || next[0]?.id || "")
+      })
+      .catch(() => setItems([]))
   }, [scanId])
 
   const compare = async () => {
     setError("")
+    setBusy(true)
     try {
       setResult(await manualApi.compareCorpus(leftId, rightId))
     } catch (reason: any) {
-      setError(reason.message || "Compare failed.")
+      setError(reason.message || "Differential comparison failed.")
+    } finally {
+      setBusy(false)
     }
   }
 
   return (
-    <div className="p-6 max-w-[1200px] mx-auto space-y-5">
-      <div>
-        <h1 className="text-lg font-semibold text-ink">Comparer</h1>
-        <p className="text-sm text-ink-3 mt-1">Compare two saved corpus responses by status, length, timing, body hash, and headers.</p>
+    <div className="p-4 sm:p-6 lg:p-8 max-w-[1700px] mx-auto space-y-6">
+      {/* Header */}
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border pb-5">
+        <div>
+          <h1 className="text-xl font-bold tracking-wider text-ink uppercase font-display flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-cyan shadow-[0_0_8px_#00f0ff]" />
+            Response Differential Comparer
+          </h1>
+          <p className="text-xs text-ink-3 font-mono mt-1">
+            Analyze discrepancies between two captured server responses across status, byte length, execution timing, and headers.
+          </p>
+        </div>
+
+        <CyberButton
+          variant="primary"
+          size="sm"
+          hudCorners
+          disabled={!leftId || !rightId}
+          loading={busy}
+          icon={<GitCompare size={13} />}
+          onClick={() => void compare()}
+        >
+          EXECUTE COMPARISON
+        </CyberButton>
       </div>
 
-      <section className="bg-card border border-border rounded-lg p-4 grid lg:grid-cols-[1fr_1fr_1fr_auto] gap-3 items-end">
-        <label className="text-xs text-ink-3">Scan
-          <select value={scanId} onChange={(event) => setScanId(event.target.value)} className="mt-1 w-full bg-canvas border border-border rounded px-3 py-2 text-sm text-ink">
-            {scans.map((scan) => <option key={scan.id} value={scan.id}>{scan.id} - {scan.target}</option>)}
-          </select>
-        </label>
-        <Selector label="Left response" value={leftId} setValue={setLeftId} items={items} />
-        <Selector label="Right response" value={rightId} setValue={setRightId} items={items} />
-        <button disabled={!leftId || !rightId} onClick={() => void compare()} className="inline-flex items-center gap-2 px-4 py-2 bg-accent text-white rounded text-sm disabled:opacity-40">
-          <GitCompare size={15} /> Compare
-        </button>
-      </section>
+      {error && (
+        <div className="p-3.5 rounded border border-critical/40 bg-critical/10 text-critical text-xs font-mono">
+          {error}
+        </div>
+      )}
 
-      {error && <p className="text-xs text-critical">{error}</p>}
-
-      <section className="bg-card border border-border rounded-lg p-4">
-        {result ? (
-          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            <Metric label="Status changed" value={result.status_changed ? "Yes" : "No"} />
-            <Metric label="Length delta" value={String(result.length_delta)} />
-            <Metric label="Time delta" value={`${Math.round(result.time_delta_ms)} ms`} />
-            <Metric label="Body changed" value={result.body_hash_changed ? "Yes" : "No"} />
-            <Metric label="Headers added" value={(result.header_keys_added || []).join(", ") || "-"} wide />
-            <Metric label="Headers removed" value={(result.header_keys_removed || []).join(", ") || "-"} wide />
+      {/* Frame Selection Bar */}
+      <CyberCard
+        title="Select Traffic Frames to Compare"
+        subtitle="Compare baseline response against fuzzing payload"
+      >
+        <div className="grid md:grid-cols-3 gap-4 font-mono text-xs">
+          <div>
+            <label className="block text-ink-3 text-[10px] uppercase font-semibold mb-1">
+              TARGET SCAN CORPUS:
+            </label>
+            <select
+              value={scanId}
+              onChange={(e) => setScanId(e.target.value)}
+              className="w-full bg-surface border border-border focus:border-cyan/50 rounded px-2.5 py-1.5 text-ink cursor-pointer"
+            >
+              {scans.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.id} - {s.target}
+                </option>
+              ))}
+            </select>
           </div>
-        ) : (
-          <p className="text-sm text-ink-3">Pick two captured responses to compare.</p>
-        )}
-      </section>
-    </div>
-  )
-}
 
-function Selector({ label, value, setValue, items }: { label: string; value: string; setValue: (value: string) => void; items: any[] }) {
-  return (
-    <label className="text-xs text-ink-3">{label}
-      <select value={value} onChange={(event) => setValue(event.target.value)} className="mt-1 w-full bg-canvas border border-border rounded px-3 py-2 text-sm text-ink">
-        {items.map((item) => <option key={item.id} value={item.id}>{item.method} {item.status || "-"} {item.path}</option>)}
-      </select>
-    </label>
-  )
-}
+          <div>
+            <label className="block text-ink-3 text-[10px] uppercase font-semibold mb-1">
+              FRAME A (BASELINE):
+            </label>
+            <select
+              value={leftId}
+              onChange={(e) => setLeftId(e.target.value)}
+              className="w-full bg-surface border border-border focus:border-cyan/50 rounded px-2.5 py-1.5 text-ink cursor-pointer"
+            >
+              {items.map((it) => (
+                <option key={it.id} value={it.id}>
+                  {it.method} {it.status || "-"} {it.path || it.url}
+                </option>
+              ))}
+            </select>
+          </div>
 
-function Metric({ label, value, wide }: { label: string; value: string; wide?: boolean }) {
-  return (
-    <div className={`bg-canvas border border-border rounded p-3 ${wide ? "lg:col-span-2" : ""}`}>
-      <p className="text-xs text-ink-3">{label}</p>
-      <p className="mt-1 text-sm text-ink break-all">{value}</p>
+          <div>
+            <label className="block text-ink-3 text-[10px] uppercase font-semibold mb-1">
+              FRAME B (PROBE):
+            </label>
+            <select
+              value={rightId}
+              onChange={(e) => setRightId(e.target.value)}
+              className="w-full bg-surface border border-border focus:border-cyan/50 rounded px-2.5 py-1.5 text-ink cursor-pointer"
+            >
+              {items.map((it) => (
+                <option key={it.id} value={it.id}>
+                  {it.method} {it.status || "-"} {it.path || it.url}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </CyberCard>
+
+      {/* Comparison Results */}
+      {result ? (
+        <div className="space-y-6">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <StatWidget
+              label="STATUS CODE DRIFT"
+              value={result.status_changed ? "CHANGED" : "IDENTICAL"}
+              sublabel={result.status_changed ? "Anomaly detected" : "No HTTP status delta"}
+              accent={result.status_changed ? "critical" : "emerald"}
+            />
+
+            <StatWidget
+              label="BYTE LENGTH DELTA"
+              value={`${(result.length_delta ?? 0) > 0 ? "+" : ""}${result.length_delta ?? 0} B`}
+              sublabel="Size variance between frames"
+              accent={Math.abs(result.length_delta ?? 0) > 50 ? "high" : "default"}
+            />
+
+            <StatWidget
+              label="TIMING VARIANCE"
+              value={`${Math.round(result.time_delta_ms ?? 0)} ms`}
+              sublabel="Latency delta"
+              accent="cyan"
+            />
+
+            <StatWidget
+              label="BODY HASH COMPARISON"
+              value={result.body_hash_changed ? "MUTATED" : "IDENTICAL"}
+              sublabel="Cryptographic hash diff"
+              accent={result.body_hash_changed ? "violet" : "default"}
+            />
+          </div>
+
+          {/* Header Changes */}
+          <div className="grid md:grid-cols-2 gap-6 font-mono text-xs">
+            <CyberCard title="Headers Added in Frame B" subtitle="New response headers detected">
+              <div className="p-3 bg-surface border border-border rounded">
+                {(result.header_keys_added || []).length > 0 ? (
+                  <ul className="space-y-1 text-emerald">
+                    {(result.header_keys_added || []).map((k: string) => (
+                      <li key={k}>+ {k}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <span className="text-ink-3">None</span>
+                )}
+              </div>
+            </CyberCard>
+
+            <CyberCard title="Headers Removed in Frame B" subtitle="Omitted headers detected">
+              <div className="p-3 bg-surface border border-border rounded">
+                {(result.header_keys_removed || []).length > 0 ? (
+                  <ul className="space-y-1 text-critical">
+                    {(result.header_keys_removed || []).map((k: string) => (
+                      <li key={k}>- {k}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <span className="text-ink-3">None</span>
+                )}
+              </div>
+            </CyberCard>
+          </div>
+        </div>
+      ) : (
+        <div className="p-16 border border-border rounded bg-panel text-center text-xs font-mono text-ink-3">
+          Select two captured response frames above and execute comparison to evaluate variances.
+        </div>
+      )}
     </div>
   )
 }
